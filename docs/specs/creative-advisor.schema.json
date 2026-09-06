@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vediogen.local/schemas/creative-advisor/1.0.0",
+  "title": "Creative Advisor Proposal Set",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "projectId",
+    "contentPack",
+    "diagnosis",
+    "proposals",
+    "basisSummary"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "projectId": { "$ref": "#/$defs/uuid" },
+    "contentPack": { "$ref": "#/$defs/versionedRef" },
+    "diagnosis": { "$ref": "#/$defs/diagnosis" },
+    "proposals": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 3,
+      "items": { "$ref": "#/$defs/proposal" }
+    },
+    "recommendedProposalKey": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "basisSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectFactIds", "evidenceItemIds", "assumptions"],
+      "properties": {
+        "projectFactIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/uuid" }
+        },
+        "evidenceItemIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/uuid" }
+        },
+        "assumptions": {
+          "type": "array",
+          "maxItems": 12,
+          "items": { "type": "string", "minLength": 1, "maxLength": 300 }
+        }
+      }
+    },
+    "blockingQuestion": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["question", "reason"],
+          "properties": {
+            "question": { "type": "string", "minLength": 1, "maxLength": 300 },
+            "reason": { "type": "string", "minLength": 1, "maxLength": 300 }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "versionedRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 50 }
+      }
+    },
+    "diagnosis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["understoodGoal", "audience", "opportunity", "primaryRisk"],
+      "properties": {
+        "understoodGoal": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "audience": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": { "type": "string", "minLength": 1, "maxLength": 100 }
+        },
+        "opportunity": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "primaryRisk": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "missingInformation": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+        }
+      }
+    },
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposalKey",
+        "name",
+        "positioning",
+        "audience",
+        "primaryGoal",
+        "contentType",
+        "hook",
+        "corePromise",
+        "visualPayoffs",
+        "pacing",
+        "emotionalPeak",
+        "close",
+        "requiredAssets",
+        "resourceEstimate",
+        "whyItFits",
+        "limitations",
+        "basis"
+      ],
+      "properties": {
+        "proposalKey": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$"
+        },
+        "name": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "positioning": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "audience": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": { "type": "string", "minLength": 1, "maxLength": 100 }
+        },
+        "primaryGoal": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "contentType": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "hook": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["text", "visual", "durationMs"],
+          "properties": {
+            "text": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "visual": { "type": "string", "minLength": 1, "maxLength": 300 },
+            "durationMs": { "type": "integer", "minimum": 500, "maximum": 3000 }
+          }
+        },
+        "corePromise": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "visualPayoffs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+        },
+        "pacing": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "emotionalPeak": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "close": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "requiredAssets": {
+          "type": "array",
+          "maxItems": 12,
+          "items": { "type": "string", "minLength": 1, "maxLength": 180 }
+        },
+        "resourceEstimate": { "enum": ["low", "medium", "high"] },
+        "estimatedDifficulty": { "enum": ["low", "medium", "high"] },
+        "whyItFits": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": { "type": "string", "minLength": 1, "maxLength": 240 }
+        },
+        "limitations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": { "type": "string", "minLength": 1, "maxLength": 240 }
+        },
+        "basis": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "summary"],
+            "properties": {
+              "type": { "enum": ["project-fact", "user-asset", "evidence", "platform-method", "creative-assumption"] },
+              "refId": { "type": ["string", "null"], "format": "uuid" },
+              "summary": { "type": "string", "minLength": 1, "maxLength": 300 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

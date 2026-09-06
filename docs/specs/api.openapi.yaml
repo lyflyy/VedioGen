@@ -1,0 +1,2336 @@
+openapi: 3.1.0
+info:
+  title: VedioGen Control API
+  version: 0.1.0
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
+  description: |
+    P0 创作主链路和内部模型管理后台的控制面 API。
+    长任务返回 Run ID，通过事件流或查询接口获取状态。
+servers:
+  - url: /api/v1
+tags:
+  - name: Projects
+    description: Project intake, facts, conversation, and project state.
+  - name: Account Brief
+    description: Creator account-level defaults copied into new projects.
+  - name: Advisor
+    description: Creative Advisor research and proposal runs.
+  - name: Briefs
+    description: Creative Brief drafts and approvals.
+  - name: Storyboards
+    description: Script and Storyboard generation, editing, and approval.
+  - name: Generation
+    description: Long-running shot generation, composition, and retry.
+  - name: Assets
+    description: User and generated asset transfer.
+  - name: Artifacts
+    description: Generated media metadata, preview, and controlled download.
+  - name: Model Providers
+    description: Internal model platform configuration.
+  - name: Model Credentials
+    description: Write-only API Key lifecycle management.
+  - name: Model Deployments
+    description: Physical model capability and health configuration.
+  - name: Model Routing
+    description: Versioned capability routing, publication, and rollback.
+  - name: Model Playground
+    description: Fixed-fixture model and routing probes for administrators.
+  - name: Model Invocations
+    description: Redacted model call observability.
+paths:
+  /health:
+    get:
+      summary: Check service health
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Service is available
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    const: ok
+
+  /account-brief:
+    get:
+      summary: Get the default creator account brief
+      tags: [Account Brief]
+      operationId: getDefaultAccountBrief
+      security:
+        - userSession: []
+      responses:
+        "200":
+          description: Current account brief
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountBrief"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      summary: Create or replace the default creator account brief
+      tags: [Account Brief]
+      operationId: upsertDefaultAccountBrief
+      security:
+        - userSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountBriefInput"
+      responses:
+        "200":
+          description: Account brief saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountBrief"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects:
+    get:
+      summary: List projects
+      tags: [Projects]
+      operationId: listProjects
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageSize"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/ProjectStatus"
+        - name: contentPackId
+          in: query
+          schema:
+            type: string
+        - name: query
+          in: query
+          description: Case-insensitive project title search.
+          schema:
+            type: string
+            maxLength: 120
+      responses:
+        "200":
+          description: Project page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectPage"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      summary: Create a project from an initial idea
+      tags: [Projects]
+      operationId: createProject
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectRequest"
+      responses:
+        "201":
+          description: Project created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}:
+    get:
+      summary: Get a project
+      tags: [Projects]
+      operationId: getProject
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: Project detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      summary: Update editable project metadata
+      tags: [Projects]
+      operationId: updateProject
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                title:
+                  type: string
+                  minLength: 1
+                  maxLength: 120
+      responses:
+        "200":
+          description: Project updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}/workspace:
+    get:
+      summary: Get a restorable project workspace snapshot
+      tags: [Projects]
+      operationId: getProjectWorkspace
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: Project, conversation, facts, evidence, assets, and current run references
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectWorkspace"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}/messages:
+    post:
+      summary: Add a user message to a project
+      tags: [Projects, Advisor]
+      operationId: addProjectMessage
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMessageRequest"
+      responses:
+        "201":
+          description: Message accepted and facts extraction scheduled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationMessage"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}/events:
+    get:
+      summary: Stream project and run events
+      tags: [Projects]
+      operationId: streamProjectEvents
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Server-sent project and run events
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}/advisor-runs:
+    post:
+      summary: Start or revise Creative Advisor proposals
+      tags: [Advisor]
+      operationId: createAdvisorRun
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                instruction:
+                  type: string
+                  maxLength: 1000
+                sourceProposalKeys:
+                  type: array
+                  maxItems: 3
+                  uniqueItems: true
+                  items:
+                    type: string
+      responses:
+        "202":
+          description: Advisor run queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdvisorRun"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /advisor-runs/{advisorRunId}:
+    get:
+      summary: Get an Advisor run and its proposals
+      tags: [Advisor]
+      operationId: getAdvisorRun
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/AdvisorRunId"
+      responses:
+        "200":
+          description: Advisor run and proposal result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdvisorRunDetail"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}/creative-briefs:
+    post:
+      summary: Create a Creative Brief draft
+      tags: [Briefs]
+      operationId: createCreativeBriefDraft
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "./creative-brief.schema.json"
+      responses:
+        "201":
+          description: Brief draft created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionedDocument"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}/creative-briefs/{briefVersionId}:
+    get:
+      summary: Get a Creative Brief version
+      tags: [Briefs]
+      operationId: getCreativeBriefVersion
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/BriefVersionId"
+      responses:
+        "200":
+          description: Creative Brief version
+          content:
+            application/json:
+              schema:
+                $ref: "./creative-brief.schema.json"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}/creative-briefs/{briefVersionId}/approval:
+    post:
+      summary: Approve an immutable Creative Brief version
+      tags: [Briefs]
+      operationId: approveCreativeBrief
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/BriefVersionId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalRequest"
+      responses:
+        "200":
+          description: Brief approved and downstream stale markers updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Approval"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}/storyboard-runs:
+    post:
+      summary: Generate a Storyboard draft
+      tags: [Storyboards]
+      operationId: generateStoryboard
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [creativeBriefVersionId]
+              properties:
+                creativeBriefVersionId:
+                  $ref: "#/components/schemas/Uuid"
+                instruction:
+                  type: string
+                  maxLength: 1000
+      responses:
+        "202":
+          description: Storyboard generation queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsyncRun"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}/storyboards/{storyboardVersionId}:
+    get:
+      summary: Get a Storyboard version
+      tags: [Storyboards]
+      operationId: getStoryboard
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/StoryboardVersionId"
+      responses:
+        "200":
+          description: Storyboard version
+          content:
+            application/json:
+              schema:
+                $ref: "./storyboard.schema.json"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      summary: Replace an editable Storyboard draft
+      tags: [Storyboards]
+      operationId: replaceStoryboardDraft
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/StoryboardVersionId"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "./storyboard.schema.json"
+      responses:
+        "200":
+          description: Draft replaced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionedDocument"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}/storyboards/{storyboardVersionId}/approval:
+    post:
+      summary: Approve an immutable Storyboard version
+      tags: [Storyboards]
+      operationId: approveStoryboard
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/StoryboardVersionId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalRequest"
+      responses:
+        "200":
+          description: Storyboard approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Approval"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /generation-runs:
+    post:
+      summary: Start generation for an approved Storyboard
+      tags: [Generation]
+      operationId: createGenerationRun
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [projectId, storyboardVersionId]
+              properties:
+                projectId:
+                  $ref: "#/components/schemas/Uuid"
+                storyboardVersionId:
+                  $ref: "#/components/schemas/Uuid"
+      responses:
+        "202":
+          description: Generation queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerationRun"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /generation-runs/{generationRunId}:
+    get:
+      summary: Get generation and shot status
+      tags: [Generation]
+      operationId: getGenerationRun
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/GenerationRunId"
+      responses:
+        "200":
+          description: Generation and shot status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerationRunDetail"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /generation-runs/{generationRunId}/cancellation:
+    post:
+      summary: Request generation cancellation
+      tags: [Generation]
+      operationId: cancelGenerationRun
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/GenerationRunId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Cancellation requested
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerationRun"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /generation-runs/{generationRunId}/shots/{shotId}/retries:
+    post:
+      summary: Retry or degrade one shot
+      tags: [Generation]
+      operationId: retryShot
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/GenerationRunId"
+        - $ref: "#/components/parameters/ShotId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                strategy:
+                  $ref: "#/components/schemas/RenderStrategy"
+      responses:
+        "202":
+          description: New shot attempt queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShotRun"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /assets/upload-intents:
+    post:
+      summary: Create an asset upload intent
+      tags: [Assets]
+      operationId: createAssetUploadIntent
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [projectId, fileName, mimeType, sizeBytes, sha256]
+              properties:
+                projectId:
+                  $ref: "#/components/schemas/Uuid"
+                fileName:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+                mimeType:
+                  type: string
+                  pattern: "^(image|video|audio)/"
+                sizeBytes:
+                  type: integer
+                  minimum: 1
+                sha256:
+                  type: string
+                  pattern: "^sha256:[a-f0-9]{64}$"
+      responses:
+        "201":
+          description: Upload intent created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadIntent"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /artifacts/{artifactId}:
+    get:
+      summary: Get generated artifact metadata and preview access
+      tags: [Artifacts]
+      operationId: getArtifact
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ArtifactId"
+      responses:
+        "200":
+          description: Artifact metadata with time-limited preview URL when available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Artifact"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /artifacts/{artifactId}/download-grants:
+    post:
+      summary: Create a time-limited artifact download grant
+      tags: [Artifacts]
+      operationId: createArtifactDownloadGrant
+      security:
+        - userSession: []
+      parameters:
+        - $ref: "#/components/parameters/ArtifactId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: Download grant created for the authorized artifact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadGrant"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-providers:
+    get:
+      summary: List model providers
+      tags: [Model Providers]
+      operationId: listModelProviders
+      security:
+        - adminSession: []
+      responses:
+        "200":
+          description: Model providers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ModelProvider"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      summary: Create a model provider
+      tags: [Model Providers]
+      operationId: createModelProvider
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelProviderInput"
+      responses:
+        "201":
+          description: Provider created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelProvider"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-providers/{providerId}:
+    patch:
+      summary: Update a model provider
+      tags: [Model Providers]
+      operationId: updateModelProvider
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderId"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelProviderInput"
+      responses:
+        "200":
+          description: Provider updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelProvider"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-credentials:
+    get:
+      summary: List redacted credential metadata
+      tags: [Model Credentials]
+      operationId: listModelCredentials
+      security:
+        - adminSession: []
+      responses:
+        "200":
+          description: Credential metadata only
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ModelCredential"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      summary: Store a new Provider API Key
+      tags: [Model Credentials]
+      operationId: createModelCredential
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCredentialRequest"
+      responses:
+        "201":
+          description: Credential written; secret is never returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelCredential"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-credentials/{credentialId}/probe:
+    post:
+      summary: Test a stored credential
+      tags: [Model Credentials]
+      operationId: probeModelCredential
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/CredentialId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Credential probe queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsyncRun"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-credentials/{credentialId}/rotation:
+    post:
+      summary: Rotate a Provider API Key
+      tags: [Model Credentials]
+      operationId: rotateModelCredential
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/CredentialId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [secret]
+              properties:
+                secret:
+                  type: string
+                  minLength: 1
+                  format: password
+                  writeOnly: true
+      responses:
+        "202":
+          description: New credential stored and rotation probe queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelCredential"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-credentials/{credentialId}/revocation:
+    post:
+      summary: Revoke a Provider API Key
+      tags: [Model Credentials]
+      operationId: revokeModelCredential
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/CredentialId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Credential enters draining or revoked state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelCredential"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-deployments:
+    get:
+      summary: List model deployments
+      tags: [Model Deployments]
+      operationId: listModelDeployments
+      security:
+        - adminSession: []
+      responses:
+        "200":
+          description: Model deployments
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ModelDeployment"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      summary: Create a model deployment
+      tags: [Model Deployments]
+      operationId: createModelDeployment
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelDeploymentInput"
+      responses:
+        "201":
+          description: Deployment created in draft state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelDeployment"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-deployments/{deploymentId}/probe:
+    post:
+      summary: Run capability probes for a model deployment
+      tags: [Model Deployments]
+      operationId: probeModelDeployment
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/DeploymentId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [fixtureIds]
+              properties:
+                fixtureIds:
+                  type: array
+                  minItems: 1
+                  uniqueItems: true
+                  items:
+                    type: string
+      responses:
+        "202":
+          description: Probe queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsyncRun"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-deployments/{deploymentId}:
+    patch:
+      summary: Update a model deployment
+      tags: [Model Deployments]
+      operationId: updateModelDeployment
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/DeploymentId"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelDeploymentInput"
+      responses:
+        "200":
+          description: Deployment updated and returned to draft when capability fields change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelDeployment"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-routing/drafts:
+    get:
+      summary: Get the current routing draft
+      tags: [Model Routing]
+      operationId: getCurrentRoutingDraft
+      security:
+        - adminSession: []
+      responses:
+        "200":
+          description: Current routing draft
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingPolicyDraft"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-routing/versions:
+    get:
+      summary: List immutable routing policy versions
+      tags: [Model Routing]
+      operationId: listRoutingPolicyVersions
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Routing policy version page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingPolicyVersionPage"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      summary: Create a routing draft
+      tags: [Model Routing]
+      operationId: createRoutingDraft
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoutingPolicyInput"
+      responses:
+        "201":
+          description: Draft created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingPolicyDraft"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-routing/{routingDraftId}/validation:
+    post:
+      summary: Validate a routing draft with fixtures
+      tags: [Model Routing]
+      operationId: validateRoutingDraft
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/RoutingDraftId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Route fixture validation queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsyncRun"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-routing/{routingDraftId}/publication:
+    post:
+      summary: Publish an immutable routing version
+      tags: [Model Routing]
+      operationId: publishRoutingDraft
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/RoutingDraftId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [changeNote]
+              properties:
+                changeNote:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+      responses:
+        "201":
+          description: Immutable route version published
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingPolicyVersion"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-routing/{routingPolicyVersionId}/rollback:
+    post:
+      summary: Roll back by publishing a prior route as a new version
+      tags: [Model Routing]
+      operationId: rollbackRoutingPolicy
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/RoutingPolicyVersionId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [changeNote]
+              properties:
+                changeNote:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+      responses:
+        "201":
+          description: New version created from rollback target
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingPolicyVersion"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-playground-runs:
+    post:
+      summary: Run a fixed-fixture model or routing probe
+      tags: [Model Playground]
+      operationId: createModelPlaygroundRun
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateModelPlaygroundRunRequest"
+      responses:
+        "202":
+          description: Playground run queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelPlaygroundRun"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-playground-runs/{playgroundRunId}:
+    get:
+      summary: Get a model playground run
+      tags: [Model Playground]
+      operationId: getModelPlaygroundRun
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/PlaygroundRunId"
+      responses:
+        "200":
+          description: Redacted probe result and actual routing chain
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelPlaygroundRun"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-invocations:
+    get:
+      summary: List redacted model invocations
+      tags: [Model Invocations]
+      operationId: listModelInvocations
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageSize"
+        - name: capabilityAlias
+          in: query
+          schema:
+            type: string
+        - name: providerId
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            enum: [created, routing, calling, streaming, validating, succeeded, failed, fallback_pending]
+        - name: projectId
+          in: query
+          schema:
+            $ref: "#/components/schemas/Uuid"
+        - name: generationRunId
+          in: query
+          schema:
+            $ref: "#/components/schemas/Uuid"
+        - name: startedAfter
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: startedBefore
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Redacted model invocation page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ModelInvocation"
+                  nextCursor:
+                    type: [string, "null"]
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/model-invocations/{invocationId}:
+    get:
+      summary: Get one redacted model invocation with its route chain
+      tags: [Model Invocations]
+      operationId: getModelInvocation
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/InvocationId"
+      responses:
+        "200":
+          description: Redacted model invocation detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelInvocationDetail"
+        default:
+          $ref: "#/components/responses/Error"
+
+components:
+  securitySchemes:
+    userSession:
+      type: http
+      scheme: bearer
+      bearerFormat: session
+      description: P0 local mode injects a fixed local user; external deployment requires authentication.
+    adminSession:
+      type: http
+      scheme: bearer
+      bearerFormat: session
+      description: Requires model-admin; P0 may restrict the admin route to localhost.
+
+  parameters:
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    ArtifactId:
+      name: artifactId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    AdvisorRunId:
+      name: advisorRunId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    BriefVersionId:
+      name: briefVersionId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    StoryboardVersionId:
+      name: storyboardVersionId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    GenerationRunId:
+      name: generationRunId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    ShotId:
+      name: shotId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    ProviderId:
+      name: providerId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[a-z][a-z0-9-]{0,63}$"
+    CredentialId:
+      name: credentialId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    DeploymentId:
+      name: deploymentId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    RoutingDraftId:
+      name: routingDraftId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    RoutingPolicyVersionId:
+      name: routingPolicyVersionId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    PlaygroundRunId:
+      name: playgroundRunId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    InvocationId:
+      name: invocationId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Current row version or ETag.
+      schema:
+        type: string
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+    PageSize:
+      name: pageSize
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  responses:
+    Error:
+      description: Error response
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Conflict:
+      description: Version, state, or idempotency conflict
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+    Timestamp:
+      type: string
+      format: date-time
+    AccountBriefInput:
+      type: object
+      additionalProperties: false
+      required: [contentPackId, accountGoal, audience, tone, publishingCadence, preferences]
+      properties:
+        contentPackId:
+          type: string
+          minLength: 1
+          maxLength: 100
+        accountGoal:
+          type: string
+          maxLength: 1000
+        audience:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            minLength: 1
+            maxLength: 120
+        tone:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            minLength: 1
+            maxLength: 80
+        publishingCadence:
+          enum: [daily, weekdays, weekly, custom]
+        preferences:
+          type: object
+          additionalProperties: true
+        rowVersion:
+          type: [integer, "null"]
+          minimum: 1
+          description: Null creates the first brief; an integer enforces optimistic concurrency.
+    AccountBrief:
+      type: object
+      additionalProperties: false
+      required: [id, contentPackId, accountGoal, audience, tone, publishingCadence, preferences, version, rowVersion, createdAt, updatedAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        contentPackId:
+          type: string
+        accountGoal:
+          type: string
+        audience:
+          type: array
+          items:
+            type: string
+        tone:
+          type: array
+          items:
+            type: string
+        publishingCadence:
+          enum: [daily, weekdays, weekly, custom]
+        preferences:
+          type: object
+          additionalProperties: true
+        version:
+          type: integer
+          minimum: 1
+        rowVersion:
+          type: integer
+          minimum: 1
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+        updatedAt:
+          $ref: "#/components/schemas/Timestamp"
+    ProjectStatus:
+      enum:
+        - intake
+        - researching
+        - advising
+        - brief_draft
+        - brief_approved
+        - storyboard_draft
+        - storyboard_approved
+        - generating
+        - needs_attention
+        - completed
+        - archived
+    Project:
+      type: object
+      additionalProperties: false
+      required: [id, title, contentPackId, contentPackVersion, mode, targetPlatform, locale, status, rowVersion, createdAt, updatedAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        title:
+          type: string
+        contentPackId:
+          type: string
+        contentPackVersion:
+          type: string
+        mode:
+          enum: [real-subject, concept]
+        targetPlatform:
+          enum: [douyin, other]
+        locale:
+          type: string
+        status:
+          $ref: "#/components/schemas/ProjectStatus"
+        currentBriefVersionId:
+          type: [string, "null"]
+          format: uuid
+        currentStoryboardVersionId:
+          type: [string, "null"]
+          format: uuid
+        rowVersion:
+          type: integer
+          minimum: 1
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+        updatedAt:
+          $ref: "#/components/schemas/Timestamp"
+    ProjectPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Project"
+        nextCursor:
+          type: [string, "null"]
+    CreateProjectRequest:
+      type: object
+      additionalProperties: false
+      required: [title, contentPackId, mode, targetPlatform, locale, initialMessage]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        contentPackId:
+          type: string
+          minLength: 1
+          maxLength: 100
+        mode:
+          enum: [real-subject, concept]
+        targetPlatform:
+          enum: [douyin, other]
+        locale:
+          type: string
+        initialMessage:
+          type: string
+          minLength: 1
+          maxLength: 10000
+        assetVersionIds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Uuid"
+    CreateMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 10000
+        assetVersionIds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Uuid"
+    ConversationMessage:
+      type: object
+      required: [id, projectId, role, text, createdAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        projectId:
+          $ref: "#/components/schemas/Uuid"
+        role:
+          enum: [user, assistant, system]
+        text:
+          type: string
+        assetVersionIds:
+          type: array
+          items:
+            $ref: "#/components/schemas/Uuid"
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+    ProjectFact:
+      type: object
+      additionalProperties: false
+      required: [id, key, value, sourceType, sourceId, confidence, status]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        key:
+          type: string
+          minLength: 1
+          maxLength: 200
+        value: {}
+        sourceType:
+          enum: [user-message, user-asset, user-confirmation]
+        sourceId:
+          $ref: "#/components/schemas/Uuid"
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        status:
+          enum: [proposed, confirmed, superseded]
+        supersedesFactId:
+          type: [string, "null"]
+          format: uuid
+    EvidenceItem:
+      type: object
+      additionalProperties: false
+      required: [id, url, title, accessedAt, excerpt, purpose, confidence, conflictsWithFactIds]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        url:
+          type: string
+          format: uri
+        title:
+          type: string
+          maxLength: 500
+        publishedAt:
+          type: [string, "null"]
+          format: date-time
+        accessedAt:
+          $ref: "#/components/schemas/Timestamp"
+        excerpt:
+          type: string
+          maxLength: 2000
+        purpose:
+          type: string
+          maxLength: 300
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        conflictsWithFactIds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Uuid"
+    AssetVersionSummary:
+      type: object
+      additionalProperties: false
+      required: [id, assetId, version, kind, sourceType, mimeType, status, createdAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        assetId:
+          $ref: "#/components/schemas/Uuid"
+        version:
+          type: integer
+          minimum: 1
+        kind:
+          enum: [image, video, audio, document]
+        sourceType:
+          enum: [user-upload, generated, extracted]
+        mimeType:
+          type: string
+        previewUrl:
+          type: [string, "null"]
+          format: uri
+        status:
+          enum: [uploading, processing, ready, failed, deleted]
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+    ProjectWorkspace:
+      type: object
+      additionalProperties: false
+      required: [project, messages, facts, evidenceItems, assetVersions, generationReadiness]
+      properties:
+        project:
+          $ref: "#/components/schemas/Project"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConversationMessage"
+        facts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectFact"
+        evidenceItems:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvidenceItem"
+        assetVersions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssetVersionSummary"
+        latestAdvisorRunId:
+          type: [string, "null"]
+          format: uuid
+        activeGenerationRunId:
+          type: [string, "null"]
+          format: uuid
+        generationReadiness:
+          type: object
+          additionalProperties: false
+          required: [ready, mode, reason]
+          properties:
+            ready:
+              type: boolean
+            mode:
+              enum: [deterministic-test-preview, missing-video-provider, video-adapter-pending, unavailable]
+            reason:
+              type: [string, "null"]
+    AdvisorRun:
+      type: object
+      required: [id, projectId, status, createdAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        projectId:
+          $ref: "#/components/schemas/Uuid"
+        status:
+          enum: [queued, researching, generating, validating, completed, failed, cancelled]
+        degraded:
+          type: boolean
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+    AdvisorRunDetail:
+      allOf:
+        - $ref: "#/components/schemas/AdvisorRun"
+        - type: object
+          properties:
+            result:
+              oneOf:
+                - $ref: "./creative-advisor.schema.json"
+                - type: "null"
+            problem:
+              oneOf:
+                - $ref: "#/components/schemas/Problem"
+                - type: "null"
+    VersionedDocument:
+      type: object
+      required: [id, version, status, rowVersion, createdAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        version:
+          type: integer
+          minimum: 1
+        status:
+          enum: [draft, approved, stale, superseded, discarded, failed]
+        rowVersion:
+          type: integer
+          minimum: 1
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+    ApprovalRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        comment:
+          type: string
+          maxLength: 1000
+    Approval:
+      type: object
+      required: [id, targetType, targetVersionId, decision, contentHash, createdAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        targetType:
+          enum: [creative-brief, storyboard]
+        targetVersionId:
+          $ref: "#/components/schemas/Uuid"
+        decision:
+          const: approved
+        contentHash:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        comment:
+          type: [string, "null"]
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+    AsyncRun:
+      type: object
+      required: [id, status, createdAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        status:
+          enum: [queued, running, completed, failed, cancelled]
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+    GenerationRun:
+      type: object
+      required: [id, projectId, storyboardVersionId, status, routingPolicyVersionId, createdAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        projectId:
+          $ref: "#/components/schemas/Uuid"
+        storyboardVersionId:
+          $ref: "#/components/schemas/Uuid"
+        routingPolicyVersionId:
+          $ref: "#/components/schemas/Uuid"
+        status:
+          enum: [queued, preparing, running, composing, inspecting, needs_attention, cancel_requested, completed, failed, cancelled]
+        costCny:
+          type: string
+          pattern: "^(0|[1-9][0-9]*)(\\.[0-9]{1,4})?$"
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+    GenerationRunDetail:
+      allOf:
+        - $ref: "#/components/schemas/GenerationRun"
+        - type: object
+          properties:
+            shotRuns:
+              type: array
+              items:
+                $ref: "#/components/schemas/ShotRun"
+            finalArtifactId:
+              type: [string, "null"]
+              format: uuid
+    ShotRun:
+      type: object
+      required: [id, generationRunId, shotId, attempt, strategy, status]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        generationRunId:
+          $ref: "#/components/schemas/Uuid"
+        shotId:
+          $ref: "#/components/schemas/Uuid"
+        attempt:
+          type: integer
+          minimum: 1
+        strategy:
+          $ref: "#/components/schemas/RenderStrategy"
+        status:
+          enum: [queued, running, validating, retry_wait, succeeded, failed, cancel_requested, cancelled, orphaned]
+        errorCode:
+          type: [string, "null"]
+    RenderStrategy:
+      enum: [user-video, image-to-video, generated-video, image-motion, blender-3d, stock-video, avatar]
+    UploadIntent:
+      type: object
+      required: [assetVersionId, uploadUrl, expiresAt]
+      properties:
+        assetVersionId:
+          $ref: "#/components/schemas/Uuid"
+        uploadUrl:
+          type: string
+          format: uri
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        expiresAt:
+          $ref: "#/components/schemas/Timestamp"
+    Artifact:
+      type: object
+      additionalProperties: false
+      required: [id, projectId, type, status, mimeType, sizeBytes, sha256, createdAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        projectId:
+          $ref: "#/components/schemas/Uuid"
+        generationRunId:
+          type: [string, "null"]
+          format: uuid
+        shotId:
+          type: [string, "null"]
+          format: uuid
+        type:
+          enum: [image, video, audio, subtitle, document, quality-report, final-video]
+        status:
+          enum: [pending, ready, failed, expired, deleted]
+        mimeType:
+          type: string
+        sizeBytes:
+          type: integer
+          minimum: 0
+        sha256:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        width:
+          type: [integer, "null"]
+          minimum: 1
+        height:
+          type: [integer, "null"]
+          minimum: 1
+        durationMs:
+          type: [integer, "null"]
+          minimum: 0
+        previewUrl:
+          type: [string, "null"]
+          format: uri
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+    DownloadGrant:
+      type: object
+      additionalProperties: false
+      required: [artifactId, downloadUrl, expiresAt]
+      properties:
+        artifactId:
+          $ref: "#/components/schemas/Uuid"
+        downloadUrl:
+          type: string
+          format: uri
+        expiresAt:
+          $ref: "#/components/schemas/Timestamp"
+    ModelProviderInput:
+      type: object
+      additionalProperties: false
+      required: [id, displayName, adapterType, baseUrl, region, enabled]
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{0,63}$"
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        adapterType:
+          type: string
+          minLength: 1
+          maxLength: 100
+        baseUrl:
+          type: string
+          format: uri
+        region:
+          type: string
+          minLength: 1
+          maxLength: 50
+        enabled:
+          type: boolean
+    ModelProvider:
+      type: object
+      additionalProperties: false
+      required: [id, displayName, adapterType, baseUrl, region, enabled, status, rowVersion, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{0,63}$"
+        displayName:
+          type: string
+        adapterType:
+          type: string
+        baseUrl:
+          type: string
+          format: uri
+        region:
+          type: string
+        enabled:
+          type: boolean
+        status:
+          enum: [draft, active, disabled]
+        rowVersion:
+          type: integer
+          minimum: 1
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+        updatedAt:
+          $ref: "#/components/schemas/Timestamp"
+    CreateCredentialRequest:
+      type: object
+      additionalProperties: false
+      required: [providerId, alias, secret]
+      properties:
+        providerId:
+          type: string
+        alias:
+          type: string
+          minLength: 1
+          maxLength: 100
+        secret:
+          type: string
+          minLength: 1
+          format: password
+          writeOnly: true
+    ModelCredential:
+      type: object
+      additionalProperties: false
+      required: [id, providerId, alias, lastFour, status, createdAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        providerId:
+          type: string
+        alias:
+          type: string
+        lastFour:
+          type: string
+          minLength: 4
+          maxLength: 4
+        status:
+          enum: [draft, active, draining, revoked, error]
+        lastSuccessAt:
+          type: [string, "null"]
+          format: date-time
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+    ModelDeploymentInput:
+      type: object
+      additionalProperties: false
+      required: [displayName, providerId, physicalModelId, credentialId, capabilities, timeoutSeconds]
+      properties:
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        providerId:
+          type: string
+        physicalModelId:
+          type: string
+          minLength: 1
+          maxLength: 200
+        credentialId:
+          $ref: "#/components/schemas/Uuid"
+        capabilities:
+          type: array
+          uniqueItems: true
+          items:
+            enum: [text, vision, streaming, tools, structured-output, embeddings, audio-input, video-input, zh-CN]
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 600
+        maxContextTokens:
+          type: [integer, "null"]
+          minimum: 1
+    ModelDeployment:
+      type: object
+      additionalProperties: false
+      required: [id, displayName, providerId, physicalModelId, credentialId, capabilities, timeoutSeconds, status, rowVersion, createdAt, updatedAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        displayName:
+          type: string
+        providerId:
+          type: string
+        physicalModelId:
+          type: string
+        credentialId:
+          $ref: "#/components/schemas/Uuid"
+        capabilities:
+          type: array
+          uniqueItems: true
+          items:
+            enum: [text, vision, streaming, tools, structured-output, embeddings, audio-input, video-input, zh-CN]
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 600
+        maxContextTokens:
+          type: [integer, "null"]
+          minimum: 1
+        status:
+          enum: [draft, testing, ready, degraded, disabled]
+        rowVersion:
+          type: integer
+          minimum: 1
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+        updatedAt:
+          $ref: "#/components/schemas/Timestamp"
+    RouteBinding:
+      type: object
+      additionalProperties: false
+      required: [capabilityAlias, requirements, primaryDeploymentId, fallbackDeploymentIds, timeoutSeconds, maxAttempts, budgetClass]
+      properties:
+        capabilityAlias:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{0,63}$"
+        requirements:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        primaryDeploymentId:
+          $ref: "#/components/schemas/Uuid"
+        fallbackDeploymentIds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Uuid"
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 600
+        maxAttempts:
+          type: integer
+          minimum: 1
+          maximum: 3
+        budgetClass:
+          enum: [low, medium, high]
+        fallbackOn:
+          type: array
+          uniqueItems: true
+          items:
+            enum: [RATE_LIMITED, TIMEOUT, PROVIDER_UNAVAILABLE, SCHEMA_INVALID]
+    RoutingPolicyInput:
+      type: object
+      additionalProperties: false
+      required: [bindings]
+      properties:
+        bindings:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/RouteBinding"
+    RoutingPolicyDraft:
+      type: object
+      additionalProperties: false
+      required: [id, bindings, status, rowVersion, createdAt, updatedAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        bindings:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/RouteBinding"
+        status:
+          enum: [draft, validating, ready]
+        rowVersion:
+          type: integer
+          minimum: 1
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+        updatedAt:
+          $ref: "#/components/schemas/Timestamp"
+    RoutingPolicyVersion:
+      type: object
+      additionalProperties: false
+      required: [id, version, bindings, status, changeNote, publishedAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        version:
+          type: integer
+          minimum: 1
+        bindings:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/RouteBinding"
+        status:
+          enum: [published, superseded]
+        changeNote:
+          type: string
+        publishedAt:
+          $ref: "#/components/schemas/Timestamp"
+    RoutingPolicyVersionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoutingPolicyVersion"
+        nextCursor:
+          type: [string, "null"]
+    CreateModelPlaygroundRunRequest:
+      type: object
+      additionalProperties: false
+      required: [capabilityAlias, routeTarget, fixtureId]
+      properties:
+        capabilityAlias:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{0,63}$"
+        routeTarget:
+          enum: [draft, published]
+        routingDraftId:
+          type: [string, "null"]
+          format: uuid
+        fixtureId:
+          type: string
+          minLength: 1
+          maxLength: 100
+        checks:
+          type: array
+          uniqueItems: true
+          items:
+            enum: [authentication, streaming, structured-output, tool-calling, zh-CN, fallback]
+    PlaygroundCheckResult:
+      type: object
+      additionalProperties: false
+      required: [check, status]
+      properties:
+        check:
+          type: string
+        status:
+          enum: [pending, passed, failed, skipped]
+        durationMs:
+          type: [integer, "null"]
+          minimum: 0
+        errorCode:
+          type: [string, "null"]
+    ModelPlaygroundRun:
+      type: object
+      additionalProperties: false
+      required: [id, capabilityAlias, routeTarget, fixtureId, status, checks, routeChain, createdAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        capabilityAlias:
+          type: string
+        routeTarget:
+          enum: [draft, published]
+        fixtureId:
+          type: string
+        status:
+          enum: [queued, running, completed, failed, cancelled]
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlaygroundCheckResult"
+        routeChain:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelInvocation"
+        redactedInput:
+          type: [string, "null"]
+        redactedOutput:
+          type: [string, "null"]
+        createdAt:
+          $ref: "#/components/schemas/Timestamp"
+        completedAt:
+          type: [string, "null"]
+          format: date-time
+    ModelInvocation:
+      type: object
+      required: [id, capabilityAlias, routingPolicyVersionId, deploymentId, credentialId, status, startedAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        projectId:
+          type: [string, "null"]
+          format: uuid
+        generationRunId:
+          type: [string, "null"]
+          format: uuid
+        capabilityAlias:
+          type: string
+        routingPolicyVersionId:
+          $ref: "#/components/schemas/Uuid"
+        deploymentId:
+          $ref: "#/components/schemas/Uuid"
+        credentialId:
+          $ref: "#/components/schemas/Uuid"
+        status:
+          enum: [created, routing, calling, streaming, validating, succeeded, failed, fallback_pending]
+        inputTokens:
+          type: integer
+          minimum: 0
+        outputTokens:
+          type: integer
+          minimum: 0
+        durationMs:
+          type: integer
+          minimum: 0
+        costCny:
+          type: string
+        errorCode:
+          type: [string, "null"]
+        parentInvocationId:
+          type: [string, "null"]
+          format: uuid
+        providerModelId:
+          type: [string, "null"]
+        startedAt:
+          $ref: "#/components/schemas/Timestamp"
+    ModelInvocationDetail:
+      allOf:
+        - $ref: "#/components/schemas/ModelInvocation"
+        - type: object
+          required: [routeChain]
+          properties:
+            providerRequestId:
+              type: [string, "null"]
+            traceId:
+              type: [string, "null"]
+            redactedInput:
+              type: [string, "null"]
+            redactedOutput:
+              type: [string, "null"]
+            routeChain:
+              type: array
+              items:
+                $ref: "#/components/schemas/ModelInvocation"
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code, traceId]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        code:
+          type: string
+        detail:
+          type: string
+        traceId:
+          type: string
+        fieldErrors:
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field:
+                type: string
+              message:
+                type: string

@@ -1,0 +1,20 @@
+{
+  "name": "vediogen",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @vediogen/web",
+    "build": "npm run build --workspace @vediogen/web",
+    "lint": "npm run lint --workspace @vediogen/web",
+    "test": "npm run test --workspace @vediogen/web",
+    "test:e2e": "npm run test:e2e --workspace @vediogen/web",
+    "api:dev": "uv run --project services/api uvicorn vediogen_api.main:app --reload --port 8000",
+    "api:test": "uv run --project services/api pytest services/api/tests -q"
+  },
+  "engines": {
+    "node": ">=20.9"
+  }
+}

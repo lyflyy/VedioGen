@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "1.0.0",
+  "projectId": "018f0000-0000-7000-8000-000000000001",
+  "contentPack": {
+    "id": "motorcycle",
+    "version": "0.1.0"
+  },
+  "parentBriefVersionId": null,
+  "sourceProposalKeys": ["product-cinema"],
+  "targetPlatform": "douyin",
+  "locale": "zh-CN",
+  "audience": ["关注摩托车外观和骑行氛围的用户"],
+  "primaryGoal": "建立张雪 800X 的视觉记忆",
+  "contentType": "vehicle-showcase",
+  "hook": {
+    "text": "力量，从细节开始。",
+    "visual": "暗场中前灯点亮，镜头快速贴近车头。",
+    "durationMs": 2000
+  },
+  "corePromise": "在 20 秒内呈现车型细节、整车姿态与高速骑行氛围。",
+  "visualLanguage": ["暗场金属高光", "稳定 360 度环绕", "低机位高速跟拍"],
+  "tone": ["冷峻", "机械", "速度感"],
+  "pacing": "细节闪切后进入稳定环绕，最后加速形成高潮。",
+  "emotionalPeak": "皮衣骑手高速冲出画面。",
+  "close": "车型名与尾灯拖影收束。",
+  "mustKeep": ["车型名称张雪 800X", "360 度环绕", "皮衣骑手高速驾驶收尾"],
+  "mustNotInvent": ["未经确认的功率、极速、价格和配置参数"],
+  "assetPlan": [
+    {
+      "purpose": "整车环绕参考",
+      "preferredSource": "either",
+      "required": true
+    }
+  ],
+  "output": {
+    "aspectRatio": "9:16",
+    "width": 1080,
+    "height": 1920,
+    "frameRate": 30,
+    "durationMs": 20000,
+    "subtitleMode": "hard"
+  },
+  "resourceEstimate": "high"
+}

@@ -1,0 +1,93 @@
+{
+  "schemaVersion": "1.0.0",
+  "projectId": "018f0000-0000-7000-8000-000000000001",
+  "creativeBriefVersionId": "018f0000-0000-7000-8000-000000000010",
+  "title": "张雪 800X 产品电影感",
+  "output": {
+    "aspectRatio": "9:16",
+    "width": 1080,
+    "height": 1920,
+    "frameRate": 30,
+    "durationMs": 20000,
+    "locale": "zh-CN"
+  },
+  "script": {
+    "voiceoverEnabled": true,
+    "voiceDirection": "低沉短句，结尾加速。",
+    "segments": [
+      {
+        "segmentKey": "opening",
+        "text": "力量，从细节开始。",
+        "delivery": "克制、低沉"
+      },
+      {
+        "segmentKey": "closing",
+        "text": "当引擎醒来，前方只剩速度。",
+        "delivery": "逐渐增强"
+      }
+    ]
+  },
+  "shots": [
+    {
+      "shotKey": "shot-01",
+      "position": 1,
+      "durationMs": 10000,
+      "purpose": "用细节与整车环绕建立车型记忆。",
+      "visual": {
+        "subject": "张雪 800X",
+        "action": "前灯点亮后完成整车环绕",
+        "scene": "暗色摄影棚",
+        "description": "从前灯和轮组细节拉到完整整车，并完成稳定环绕。",
+        "mustShow": ["车型完整轮廓"],
+        "mustAvoid": ["未经确认的部件结构"]
+      },
+      "camera": {
+        "shotSize": "wide",
+        "angle": "前侧低机位",
+        "movement": "微距推进后转为 360 度环绕",
+        "lensIntent": "保持车身比例可信"
+      },
+      "audio": {
+        "voiceoverSegmentKey": "opening",
+        "onScreenText": "张雪 800X",
+        "soundDirection": "点火声和金属冲击音进入。"
+      },
+      "preferredStrategy": "blender-3d",
+      "fallbackStrategies": ["image-to-video", "image-motion"],
+      "assetVersionIds": [],
+      "continuity": ["保持车型颜色和贴花位置"],
+      "origin": "user-required"
+    },
+    {
+      "shotKey": "shot-02",
+      "position": 2,
+      "durationMs": 10000,
+      "purpose": "以高速骑行兑现速度感。",
+      "visual": {
+        "subject": "张雪 800X 与黑色皮衣骑手",
+        "action": "低机位高速驶过并冲出画面",
+        "scene": "冷色封闭道路",
+        "description": "骑手俯身加速，车身轮廓保持可辨识，尾灯拖影收束。",
+        "mustShow": ["黑色皮衣和全盔", "车型轮廓"],
+        "mustAvoid": ["运动模糊完全遮挡车辆"]
+      },
+      "camera": {
+        "shotSize": "medium",
+        "angle": "低机位后侧跟拍",
+        "movement": "平行跟拍后让车辆冲出画面",
+        "lensIntent": "强调速度但保留主体"
+      },
+      "audio": {
+        "voiceoverSegmentKey": "closing",
+        "onScreenText": null,
+        "soundDirection": "发动机升转，音乐进入高潮后收束。"
+      },
+      "preferredStrategy": "image-to-video",
+      "fallbackStrategies": ["user-video", "image-motion"],
+      "assetVersionIds": [],
+      "continuity": ["沿用第一个镜头的车型颜色和灯光状态"],
+      "origin": "user-required"
+    }
+  ],
+  "continuityRules": ["所有镜头共享同一车型 Reference Pack"]
+}

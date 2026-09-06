@@ -1,0 +1,6 @@
+extends:
+  - recommended
+
+rules:
+  # Every operation defines a shared default application/problem+json response.
+  operation-4xx-response: off

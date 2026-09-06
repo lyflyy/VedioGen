@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vediogen.local/schemas/shot-manifest/1.0.0",
+  "title": "Executable Shot Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "manifestId",
+    "projectId",
+    "generationRunId",
+    "storyboardVersionId",
+    "shotId",
+    "contentPack",
+    "timing",
+    "output",
+    "render",
+    "audio",
+    "budget",
+    "provenance"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "manifestId": { "$ref": "#/$defs/uuid" },
+    "projectId": { "$ref": "#/$defs/uuid" },
+    "generationRunId": { "$ref": "#/$defs/uuid" },
+    "storyboardVersionId": { "$ref": "#/$defs/uuid" },
+    "shotId": { "$ref": "#/$defs/uuid" },
+    "contentPack": { "$ref": "#/$defs/versionedRef" },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["durationMs", "frameRate"],
+      "properties": {
+        "durationMs": { "type": "integer", "minimum": 500, "maximum": 15000 },
+        "frameRate": { "type": "number", "enum": [24, 25, 30, 50, 60] }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height", "container", "videoCodec", "colorSpace"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 360 },
+        "height": { "type": "integer", "minimum": 640 },
+        "container": { "enum": ["mp4", "image-sequence"] },
+        "videoCodec": { "enum": ["h264", "prores", "png", "exr"] },
+        "colorSpace": { "enum": ["rec709", "acescg"] },
+        "qualityProfile": { "enum": ["preview", "final"] }
+      }
+    },
+    "render": {
+      "oneOf": [
+        { "$ref": "#/$defs/userVideoRender" },
+        { "$ref": "#/$defs/imageToVideoRender" },
+        { "$ref": "#/$defs/generatedVideoRender" },
+        { "$ref": "#/$defs/imageMotionRender" },
+        { "$ref": "#/$defs/blenderRender" },
+        { "$ref": "#/$defs/stockVideoRender" },
+        { "$ref": "#/$defs/avatarRender" }
+      ]
+    },
+    "audio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["voiceoverEnabled", "soundDirection"],
+      "properties": {
+        "voiceoverEnabled": { "type": "boolean" },
+        "voiceoverArtifactId": { "type": ["string", "null"], "format": "uuid" },
+        "subtitleArtifactId": { "type": ["string", "null"], "format": "uuid" },
+        "soundDirection": { "type": "string", "maxLength": 240 },
+        "musicCue": { "type": ["string", "null"], "maxLength": 160 }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxAttempts", "timeoutSeconds", "maxCostCny"],
+      "properties": {
+        "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "timeoutSeconds": { "type": "integer", "minimum": 10, "maximum": 7200 },
+        "maxCostCny": { "type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,4})?$" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["promptVersion", "routingPolicyVersionId", "inputArtifactHashes", "compiledAt"],
+      "properties": {
+        "promptVersion": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "routingPolicyVersionId": { "$ref": "#/$defs/uuid" },
+        "inputArtifactHashes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+        },
+        "compiledAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "versionedRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 50 }
+      }
+    },
+    "assetRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assetVersionId", "sha256"],
+      "properties": {
+        "assetVersionId": { "$ref": "#/$defs/uuid" },
+        "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+      }
+    },
+    "prompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["positive"],
+      "properties": {
+        "positive": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "negative": { "type": "string", "maxLength": 2000 },
+        "seed": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "userVideoRender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source", "trimStartMs", "trimDurationMs", "fit"],
+      "properties": {
+        "kind": { "const": "user-video" },
+        "source": { "$ref": "#/$defs/assetRef" },
+        "trimStartMs": { "type": "integer", "minimum": 0 },
+        "trimDurationMs": { "type": "integer", "minimum": 500 },
+        "fit": { "enum": ["cover", "contain"] }
+      }
+    },
+    "imageToVideoRender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "capabilityAlias", "prompt", "referenceImages", "motion"],
+      "properties": {
+        "kind": { "const": "image-to-video" },
+        "capabilityAlias": { "const": "image-to-video" },
+        "prompt": { "$ref": "#/$defs/prompt" },
+        "referenceImages": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/assetRef" }
+        },
+        "motion": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    },
+    "generatedVideoRender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "capabilityAlias", "prompt", "motion"],
+      "properties": {
+        "kind": { "const": "generated-video" },
+        "capabilityAlias": { "const": "text-to-video" },
+        "prompt": { "$ref": "#/$defs/prompt" },
+        "referenceImages": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/assetRef" }
+        },
+        "motion": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    },
+    "imageMotionRender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source", "motionPreset"],
+      "properties": {
+        "kind": { "const": "image-motion" },
+        "source": { "$ref": "#/$defs/assetRef" },
+        "motionPreset": { "enum": ["push-in", "pull-out", "pan-left", "pan-right", "parallax", "orbit-simulated"] },
+        "strength": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "blenderRender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "blenderVersion", "sceneTemplate", "assets", "cameraPreset", "parameters"],
+      "properties": {
+        "kind": { "const": "blender-3d" },
+        "blenderVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+(\\.[0-9]+)?$" },
+        "sceneTemplate": { "$ref": "#/$defs/versionedRef" },
+        "assets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/assetRef" }
+        },
+        "cameraPreset": { "$ref": "#/$defs/versionedRef" },
+        "parameters": {
+          "type": "object",
+          "maxProperties": 50,
+          "additionalProperties": {
+            "type": ["string", "number", "integer", "boolean"]
+          }
+        }
+      }
+    },
+    "stockVideoRender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source", "trimStartMs", "trimDurationMs"],
+      "properties": {
+        "kind": { "const": "stock-video" },
+        "source": { "$ref": "#/$defs/assetRef" },
+        "trimStartMs": { "type": "integer", "minimum": 0 },
+        "trimDurationMs": { "type": "integer", "minimum": 500 }
+      }
+    },
+    "avatarRender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "capabilityAlias", "avatarRef", "speechArtifactId"],
+      "properties": {
+        "kind": { "const": "avatar" },
+        "capabilityAlias": { "const": "avatar-video" },
+        "avatarRef": { "$ref": "#/$defs/versionedRef" },
+        "speechArtifactId": { "$ref": "#/$defs/uuid" },
+        "backgroundAsset": { "$ref": "#/$defs/assetRef" }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+node_modules/
+.next/
+playwright-report/
+test-results/
+coverage/
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.data/
+apps/web/public/generated/
+*.log
+.env
+.env.local

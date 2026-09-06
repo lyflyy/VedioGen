@@ -1,0 +1,86 @@
+{
+  "schemaVersion": "1.0.0",
+  "projectId": "018f0000-0000-7000-8000-000000000001",
+  "contentPack": {
+    "id": "motorcycle",
+    "version": "0.1.0"
+  },
+  "diagnosis": {
+    "understoodGoal": "为张雪 800X 制作强调车型细节与速度感的抖音短视频。",
+    "audience": ["关注摩托车外观和骑行氛围的用户"],
+    "opportunity": "用可控环绕建立车型记忆，再用动态骑行形成情绪回报。",
+    "primaryRisk": "只有文字资料时，关键部件与真实车型可能产生偏差。",
+    "missingInformation": ["缺少多角度车型参考图"]
+  },
+  "proposals": [
+    {
+      "proposalKey": "product-cinema",
+      "name": "产品电影感",
+      "positioning": "先展示机械细节，再用高速骑行释放速度感。",
+      "audience": ["外观与性能氛围爱好者"],
+      "primaryGoal": "建立车型视觉记忆",
+      "contentType": "vehicle-showcase",
+      "hook": {
+        "text": "力量，从细节开始。",
+        "visual": "暗场中前灯点亮，镜头快速贴近车头。",
+        "durationMs": 2000
+      },
+      "corePromise": "在短时间内看清整车姿态和最有力量的视觉细节。",
+      "visualPayoffs": ["摄影棚 360 度环绕", "低机位高速骑行"],
+      "pacing": "前半段细节闪切，中段稳定环绕，后半段加速进入高潮。",
+      "emotionalPeak": "皮衣骑手低机位高速冲出画面。",
+      "close": "车型名与尾灯拖影收束。",
+      "requiredAssets": ["车型多角度参考", "骑手视觉参考"],
+      "resourceEstimate": "high",
+      "estimatedDifficulty": "high",
+      "whyItFits": ["符合用户指定的车辆聚焦和 360 度环绕"],
+      "limitations": ["缺少准确 3D 资产时环绕镜头保真度有限"],
+      "basis": [
+        {
+          "type": "project-fact",
+          "summary": "用户确认车型为张雪 800X。"
+        },
+        {
+          "type": "platform-method",
+          "summary": "用 Hook、Proof 和 Payoff 组织短视频节奏。"
+        }
+      ]
+    },
+    {
+      "proposalKey": "detail-reveal",
+      "name": "细节揭示",
+      "positioning": "围绕灯组、轮组和车身线条建立审美记忆。",
+      "audience": ["偏好机械细节的摩托车用户"],
+      "primaryGoal": "强化车型辨识度",
+      "contentType": "detail-aesthetic",
+      "hook": {
+        "text": "你会先注意到哪个细节？",
+        "visual": "灯组、刹车盘和油箱曲面连续微距切换。",
+        "durationMs": 2500
+      },
+      "corePromise": "用特写看懂车型的视觉性格。",
+      "visualPayoffs": ["关键部件微距", "整车轮廓揭示"],
+      "pacing": "连续微距建立悬念，最后从局部拉到整车。",
+      "emotionalPeak": "整车从暗场完整显现。",
+      "close": "用问题引导评论选择最喜欢的细节。",
+      "requiredAssets": ["真实关键部件参考图"],
+      "resourceEstimate": "medium",
+      "estimatedDifficulty": "medium",
+      "whyItFits": ["能在较低动态生成风险下突出车辆聚焦细节"],
+      "limitations": ["速度感弱于高速骑行方案"],
+      "basis": [
+        {
+          "type": "user-asset",
+          "summary": "当前尚无用户图片，实施前需要补充或生成参考。"
+        }
+      ]
+    }
+  ],
+  "recommendedProposalKey": "product-cinema",
+  "basisSummary": {
+    "projectFactIds": ["018f0000-0000-7000-8000-000000000002"],
+    "evidenceItemIds": [],
+    "assumptions": ["默认面向普通摩托车兴趣用户"]
+  },
+  "blockingQuestion": null
+}

@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vediogen.local/schemas/storyboard/1.0.0",
+  "title": "Storyboard Draft",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "projectId",
+    "creativeBriefVersionId",
+    "title",
+    "output",
+    "script",
+    "shots"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "projectId": { "$ref": "#/$defs/uuid" },
+    "creativeBriefVersionId": { "$ref": "#/$defs/uuid" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "output": { "$ref": "#/$defs/outputProfile" },
+    "script": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["voiceoverEnabled", "segments"],
+      "properties": {
+        "voiceoverEnabled": { "type": "boolean" },
+        "voiceDirection": { "type": "string", "maxLength": 300 },
+        "segments": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["segmentKey", "text"],
+            "properties": {
+              "segmentKey": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+              "text": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "delivery": { "type": "string", "maxLength": 160 }
+            }
+          }
+        }
+      }
+    },
+    "shots": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": { "$ref": "#/$defs/shot" }
+    },
+    "continuityRules": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "minLength": 1, "maxLength": 300 }
+    }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "outputProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["aspectRatio", "width", "height", "frameRate", "durationMs", "locale"],
+      "properties": {
+        "aspectRatio": { "const": "9:16" },
+        "width": { "type": "integer", "minimum": 360 },
+        "height": { "type": "integer", "minimum": 640 },
+        "frameRate": { "type": "number", "enum": [24, 25, 30, 50, 60] },
+        "durationMs": { "type": "integer", "minimum": 5000, "maximum": 60000 },
+        "locale": { "type": "string", "pattern": "^[a-z]{2,3}(-[A-Z]{2})?$" }
+      }
+    },
+    "shot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "shotKey",
+        "position",
+        "durationMs",
+        "purpose",
+        "visual",
+        "camera",
+        "audio",
+        "preferredStrategy",
+        "fallbackStrategies",
+        "continuity"
+      ],
+      "properties": {
+        "shotKey": { "type": "string", "pattern": "^shot-[0-9]{2}$" },
+        "position": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "durationMs": { "type": "integer", "minimum": 500, "maximum": 15000 },
+        "purpose": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "visual": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subject", "action", "scene", "description"],
+          "properties": {
+            "subject": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "action": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "scene": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+            "mustShow": {
+              "type": "array",
+              "maxItems": 10,
+              "items": { "type": "string", "minLength": 1, "maxLength": 160 }
+            },
+            "mustAvoid": {
+              "type": "array",
+              "maxItems": 10,
+              "items": { "type": "string", "minLength": 1, "maxLength": 160 }
+            }
+          }
+        },
+        "camera": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["shotSize", "movement"],
+          "properties": {
+            "shotSize": { "enum": ["extreme-close-up", "close-up", "medium", "wide", "aerial", "pov"] },
+            "angle": { "type": "string", "maxLength": 120 },
+            "movement": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "lensIntent": { "type": "string", "maxLength": 160 }
+          }
+        },
+        "audio": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["soundDirection"],
+          "properties": {
+            "voiceoverSegmentKey": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9-]{0,63}$" },
+            "onScreenText": { "type": ["string", "null"], "maxLength": 80 },
+            "soundDirection": { "type": "string", "minLength": 1, "maxLength": 240 }
+          }
+        },
+        "preferredStrategy": { "$ref": "#/$defs/strategy" },
+        "fallbackStrategies": {
+          "type": "array",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/strategy" }
+        },
+        "assetVersionIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/uuid" }
+        },
+        "continuity": {
+          "type": "array",
+          "maxItems": 10,
+          "items": { "type": "string", "minLength": 1, "maxLength": 240 }
+        },
+        "origin": { "enum": ["user-required", "ai-proposed", "user-edited"] }
+      }
+    },
+    "strategy": {
+      "enum": [
+        "user-video",
+        "image-to-video",
+        "generated-video",
+        "image-motion",
+        "blender-3d",
+        "stock-video",
+        "avatar"
+      ]
+    }
+  }
+}

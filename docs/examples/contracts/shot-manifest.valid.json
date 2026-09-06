@@ -1,0 +1,58 @@
+{
+  "schemaVersion": "1.0.0",
+  "manifestId": "018f0000-0000-7000-8000-000000000020",
+  "projectId": "018f0000-0000-7000-8000-000000000001",
+  "generationRunId": "018f0000-0000-7000-8000-000000000021",
+  "storyboardVersionId": "018f0000-0000-7000-8000-000000000022",
+  "shotId": "018f0000-0000-7000-8000-000000000023",
+  "contentPack": {
+    "id": "motorcycle",
+    "version": "0.1.0"
+  },
+  "timing": {
+    "durationMs": 5000,
+    "frameRate": 30
+  },
+  "output": {
+    "width": 1080,
+    "height": 1920,
+    "container": "mp4",
+    "videoCodec": "h264",
+    "colorSpace": "rec709",
+    "qualityProfile": "preview"
+  },
+  "render": {
+    "kind": "image-to-video",
+    "capabilityAlias": "image-to-video",
+    "prompt": {
+      "positive": "真实摩托车在暗色摄影棚中稳定缓慢环绕，保持车型结构一致。",
+      "negative": "结构变形，错误车轮，多余部件，文字水印",
+      "seed": 42
+    },
+    "referenceImages": [
+      {
+        "assetVersionId": "018f0000-0000-7000-8000-000000000024",
+        "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ],
+    "motion": "前侧三分之二视角开始，围绕车辆完成平滑四分之一圈运动。"
+  },
+  "audio": {
+    "voiceoverEnabled": false,
+    "voiceoverArtifactId": null,
+    "subtitleArtifactId": null,
+    "soundDirection": "仅保留低频发动机环境音。",
+    "musicCue": null
+  },
+  "budget": {
+    "maxAttempts": 2,
+    "timeoutSeconds": 600,
+    "maxCostCny": "10.0000"
+  },
+  "provenance": {
+    "promptVersion": "motorcycle.image-to-video.1",
+    "routingPolicyVersionId": "018f0000-0000-7000-8000-000000000025",
+    "inputArtifactHashes": ["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+    "compiledAt": "2026-09-05T08:00:00Z"
+  }
+}
