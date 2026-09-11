@@ -12,6 +12,9 @@ dependencies = [
   "psycopg[binary]>=3.2.3",
   "sqlalchemy>=2.0.36",
   "uvicorn[standard]>=0.34.0",
+  "ddgs>=9,<10",
+  "pillow>=12.1,<13",
+  "psutil>=7,<8",
 ]
 
 [dependency-groups]
@@ -19,6 +22,9 @@ dev = [
   "pytest>=8.3.4",
   "pytest-cov>=6.0.0",
 ]
+
+[project.optional-dependencies]
+speech = ["piper-tts==1.8.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

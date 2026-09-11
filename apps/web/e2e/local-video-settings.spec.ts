@@ -1,0 +1,30 @@
+import { expect, test } from "@playwright/test";
+import { expectNoHorizontalOverflow, expectNoSeriousA11yIssues } from "./helpers";
+
+test("local video configuration persists and does not probe real GPU in isolated tests", async ({ page }, testInfo) => {
+  await page.goto("/admin/video-settings");
+  await page.getByLabel("执行方式").selectOption("comfyui");
+  await page.getByLabel("本地服务地址").fill("http://127.0.0.1:8189");
+  await page.getByLabel("原生宽度").fill("256");
+  await page.getByLabel("原生高度").fill("448");
+  await page.getByLabel("启用本地视频生成").check();
+  await page.getByLabel("中文声音模型路径").fill("D:/voices/zh_CN-huayan-medium.onnx");
+  await page.getByRole("button", { name: "保存视频配置" }).click();
+  await expect(page.getByText("配置已保存；尚未验证真实推理。")).toBeVisible();
+  await page.reload();
+  await expect(page.getByLabel("执行方式")).toHaveValue("comfyui");
+  await expect(page.getByLabel("本地服务地址")).toHaveValue("http://127.0.0.1:8189");
+  await expect(page.getByLabel("中文声音模型路径")).toHaveValue("D:/voices/zh_CN-huayan-medium.onnx");
+  await expect(page.getByLabel("启用本地 Piper 旁白")).not.toBeChecked();
+  await page.getByRole("button", { name: "检查已保存的本地配置" }).click();
+  await expect(page.getByText("当前环境禁止本地模型访问", { exact: true })).toBeVisible();
+  await expectNoSeriousA11yIssues(page);
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: testInfo.outputPath("local-settings-desktop.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: testInfo.outputPath("local-settings-mobile.png"), fullPage: true });
+  await page.getByLabel("执行方式").selectOption("fal");
+  await expect(page.getByLabel("启用付费视频调用")).toBeVisible();
+  await expect(page.getByLabel("参考单价（USD / 秒）")).toBeVisible();
+});

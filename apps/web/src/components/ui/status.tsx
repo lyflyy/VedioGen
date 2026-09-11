@@ -10,6 +10,11 @@ const labels: Record<string, string> = {
   storyboard_draft: "分镜待确认",
   storyboard_approved: "分镜已确认",
   generating: "生成中",
+  queued: "等待处理",
+  running: "处理中",
+  composing: "合成中",
+  cancelled: "已停止",
+  interrupted: "服务中断",
   needs_attention: "需要处理",
   completed: "已完成",
   active: "可用",
@@ -21,6 +26,9 @@ const labels: Record<string, string> = {
   succeeded: "已完成",
   superseded: "已取代",
   failed: "失败",
+  empty: "无匹配素材",
+  search_completed: "检索完成",
+  needs_clarification: "待确认主体",
 };
 
 export function Status({ value }: { value: string }) {

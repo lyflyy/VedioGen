@@ -1,7 +1,19 @@
 import hashlib
+import time
 from pathlib import Path
 
 from vediogen_api.media import create_preview_video
+
+
+def wait_generation(client, run_id):
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        run = client.get(f"/api/v1/generation-runs/{run_id}").json()
+        if run["status"] not in {"queued", "running", "composing"}:
+            assert run["status"] == "completed", run
+            return run
+        time.sleep(0.1)
+    raise AssertionError("Generation did not finish")
 
 
 def test_creator_flow_generates_downloadable_vertical_video(client):
@@ -35,7 +47,7 @@ def test_creator_flow_generates_downloadable_vertical_video(client):
     assert created.status_code == 201
     project_id = created.json()["id"]
 
-    asset_content = b"deterministic-motorcycle-reference"
+    asset_content = (Path(__file__).resolve().parents[3] / "apps/web/public/images/motorcycle-studio.jpg").read_bytes()
     upload_intent = client.post(
         "/api/v1/assets/upload-intents",
         json={
@@ -77,22 +89,26 @@ def test_creator_flow_generates_downloadable_vertical_video(client):
     storyboard = client.get(f"/api/v1/projects/{project_id}/storyboards/{storyboard_id}").json()
     assert len(storyboard["shots"]) == 5
     assert storyboard["totalDurationMs"] == 12000
+    for shot in storyboard["shots"]:
+        shot["sourceAssetId"] = uploaded.json()["id"]
+    assert client.put(f"/api/v1/projects/{project_id}/storyboards/{storyboard_id}", json={"shots": storyboard["shots"], "totalDurationMs": 12000}).status_code == 200
     assert client.post(f"/api/v1/projects/{project_id}/storyboards/{storyboard_id}/approval", json={}).status_code == 201
 
     generation = client.post(
         "/api/v1/generation-runs",
-        json={"projectId": project_id, "storyboardVersionId": storyboard_id},
+        json={"projectId": project_id, "storyboardVersionId": storyboard_id, "quality": "preview"},
     )
     assert generation.status_code == 202, generation.text
-    generation_body = generation.json()
-    assert generation_body["status"] == "completed"
+    assert generation.json()["status"] == "queued"
+    generation_body = wait_generation(client, generation.json()["id"])
+    assert generation_body["costCny"] is None
     assert len(generation_body["shotRuns"]) == 5
 
     artifact_id = generation_body["finalArtifactId"]
     artifact = client.get(f"/api/v1/artifacts/{artifact_id}").json()
     assert artifact["width"] == 540
     assert artifact["height"] == 960
-    assert artifact["durationMs"] == 6000
+    assert abs(artifact["durationMs"] - 12000) < 250
     assert artifact["sha256"].startswith("sha256:")
 
     media = client.get(f"/api/v1/artifacts/{artifact_id}/content")
@@ -102,10 +118,9 @@ def test_creator_flow_generates_downloadable_vertical_video(client):
 
 
 def test_retry_only_adds_attempt_for_selected_shot(client):
-    projects = client.get("/api/v1/projects").json()["items"]
-    project = next(item for item in projects if item["title"] == "张雪 800X 最酷视频")
-    workspace = client.get(f"/api/v1/projects/{project['id']}/workspace").json()
-    run = client.get(f"/api/v1/generation-runs/{workspace['activeGenerationRunId']}").json()
+    from test_media_generation import prepared, start
+    project_id, storyboard_id, _ = prepared(client)
+    run = wait_generation(client, start(client, project_id, storyboard_id).json()["id"])
     original_count = len(run["shotRuns"])
     selected = run["shotRuns"][1]
     retried = client.post(f"/api/v1/generation-runs/{run['id']}/shots/{selected['shotId']}/retries")
@@ -114,6 +129,9 @@ def test_retry_only_adds_attempt_for_selected_shot(client):
     assert len(after["shotRuns"]) == original_count + 1
     assert after["shotRuns"][-1]["shotId"] == selected["shotId"]
     assert after["shotRuns"][-1]["attempt"] == 2
+    finished = wait_generation(client, run["id"])
+    assert finished["finalArtifactId"] != run["finalArtifactId"]
+    assert finished["shotRuns"][0]["artifactId"] == run["shotRuns"][0]["artifactId"]
 
 
 def test_preview_media_is_deterministic(tmp_path):

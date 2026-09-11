@@ -16,7 +16,7 @@ const stages = [
   ["final", "成片"],
 ] as const;
 
-export function ProjectHeader({ project, activeStage }: { project: Project; activeStage: string }) {
+export function ProjectHeader({ project, activeStage, unsaved = false }: { project: Project; activeStage: string; unsaved?: boolean }) {
   return (
     <header className="project-header">
       <div className="project-title-row">
@@ -26,7 +26,7 @@ export function ProjectHeader({ project, activeStage }: { project: Project; acti
           <h1>{project.title}</h1>
         </div>
         <div className="project-meta">
-          <span className="save-state"><Cloud size={15} /><Check size={12} /> 已保存</span>
+          <span className="save-state"><Cloud size={15} />{unsaved ? "有未保存修改" : <><Check size={12} /> 已保存</>}</span>
           <Status value={project.status} />
           <Tooltip label="项目操作">
             <button className="icon-button" aria-label="项目操作"><MoreHorizontal size={18} /></button>

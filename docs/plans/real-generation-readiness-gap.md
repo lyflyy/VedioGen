@@ -1,18 +1,22 @@
 # 真实模型与视频生成执行差距
 
-- 状态：Gate 0、Gate 1 已完成；Gate 2 等待视频 Provider
-- 日期：2026-09-05
+> 当前执行优先级见[企业内部 MVP 计划](2026-09-06-internal-mvp-reset.md)：先验证关键真实镜头和 80 分成片，本文 Gate 不再要求完整治理全部完成后才接视频。
+
+- 状态：Gate 0 有历史入口验证；Gate 1 部分完成，需补事实、确认与契约验收；Gate 2 等待视频 Provider 及持久任务实现
+- 日期：2026-09-05；2026-09-06 复核修订
 - 适用范围：用户照片与文案生成可交付摩托车短视频
 
 ## 1. 现场核查结论
 
+2026-09-06 修订：真实 GPT 调用成功不等于本文件 Gate 1 全部完成。事实仍由 Fixture 创建，Brief 为确定性编译，分镜运行结构尚未对齐中央契约；确认约束、任务恢复、Fake 隔离和错误脱敏也有缺口。详见[架构复核](../architecture/2026-09-06-architecture-review.md)。以下保留历史调用证据，不能据此宣称生产闭环已完成。
+
 首次核查时实现是技术垂直切片，不是真实 AI 生成链路。2026-09-05 完成整改后的状态如下：
 
 - 正常 Creator 页面已经持久化用户项目和一张 350,216 字节 JPEG，AssetVersion 状态为 `ready`，刷新后可恢复。
-- 已实现 `openai-compatible` Adapter；Creative Advisor 和 Storyboard Generator 均通过发布路由调用真实模型，Fake 只用于确定性自动测试。
+- 已实现 `openai-compatible` Adapter；Creative Advisor 和 Storyboard Generator 均通过发布路由调用真实模型。Fake 预期只用于测试/演示，但运行时尚未强制隔离。
 - Credential 探测真实请求 `/models`；Deployment 探测真实执行最小严格结构化生成，失败不会标记为 `ready`。
-- 调用记录保存实际模型、Provider Request ID、输入/输出 Token、耗时和脱敏摘要，不保存或返回密钥。
-- 新建项目入口加入创建、哈希、上传和进入分析的分步进度；此前“按钮不可点击”根因是 Next.js 开发服务未水合，而不是 API Key。
+- 成功创意/分镜调用记录保存实际模型、Provider Request ID、Token 和耗时；正常路径不写密钥，但供应商自由文本错误的脱敏尚不可靠，异常调用的用量也可能丢失。
+- 新建项目入口加入创建、哈希、上传和进入分析的分步进度；此前观察到开发页面未水合，不能据此排除长请求、代理超时等其他流程故障。
 - 生成阶段仍没有图片/视频生成 Provider。生产路由现在会在此处明确阻断，不再把内置图片 FFmpeg 预览冒充真实成片；Fake 测试环境保留确定性媒体检查。
 - 上传文件只保存在本机。多数云端视频模型无法访问 `localhost`，需要对象存储和短期签名 URL，或使用支持直接文件上传的 Provider。
 - 生成任务当前同步执行，没有真实视频任务所需的队列、轮询、取消、超时恢复和 SSE 进度。
@@ -116,11 +120,13 @@ GPT 在本项目中负责照片理解、事实提取、创意建议、脚本、S
 ## 8. Gate 1 真实验收记录
 
 - Credential probe：HTTP 成功，返回 20 个模型，约 5.3 秒。
-- Deployment probe：`gpt-5.4-mini` 严格 JSON Schema 成功，约 7.9 秒，真实 Provider Request ID 已写入调用记录。
+- Deployment probe：历史最小结构化探测成功，约 7.9 秒，接口返回 Provider Request ID；当前探针实现没有单独持久化该调用记录，也没有实测全部声明能力。
 - Creator intake：正常页面创建 Project，并上传 JPEG；项目与 AssetVersion 已写入 `.data/vediogen.db` 和 `.data/assets/`。
 - Creative Advisor：真实图片 + 中文文案输入，2722 input tokens、2296 output tokens、约 47.2 秒，输出三个 Proposal 并通过本地 `creative-advisor.schema.json` 校验。
 - Storyboard Generator：3235 input tokens、1837 output tokens、约 34.5 秒，输出 5 个镜头、旁白、字幕、机位、素材策略和连续性约束。
 - 真实输出识别出需要 `blender-3d`、`image-to-video` 和 `generated-video`；由于没有视频 Provider，生成页正确显示阻断原因。
 - 真实响应未提供费用字段，当前成本为 `unavailable/0.0000` 占位；不能把它解释为免费。需由中转站账单或价格配置补齐。
 
-验收期间发现并修复两项问题：打开已有策略页会因 React 状态竞态重复调用 Advisor；现在以 `latestAdvisorRunId` 作为防重条件。另一个问题是运行 `next build` 会覆盖正在运行的 `next dev` 的 `.next` 产物并导致页面不水合；操作顺序固定为先完成 build，再启动/重启 dev server。
+历史验收中修复了打开已有策略页重复调用 Advisor 的前端竞态，现在以 `latestAdvisorRunId` 防重，但尚无服务端幂等。另曾观察到 build/dev 并用及页面未水合；先 build 再重启 dev 是操作规避措施，不视为所有页面等待故障的已证实根因，仍需长请求和任务恢复整改。
+
+历史上传样例使用仓库参考 JPEG，并非已核实的用户真实车型素材。真实样片的车型一致性、镜头顺序、总时长、费用和影视级质量尚未通过验收；当前费用 `0.0000` 是未知占位，不表示免费。

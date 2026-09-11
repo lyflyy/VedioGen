@@ -10,7 +10,11 @@ describe("Status", () => {
   });
 
   it("keeps unknown status values observable", () => {
+    render(<Status value="unknown-state" />);
+    expect(screen.getByText("unknown-state")).toHaveClass("status-neutral");
+  });
+  it("localizes queued media jobs", () => {
     render(<Status value="queued" />);
-    expect(screen.getByText("queued")).toHaveClass("status-neutral");
+    expect(screen.getByText("等待处理")).toHaveClass("status-neutral");
   });
 });

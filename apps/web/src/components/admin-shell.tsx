@@ -9,6 +9,7 @@ const items = [
   { href: "/admin/model-providers", label: "模型平台", icon: ServerCog },
   { href: "/admin/credentials", label: "API Key", icon: KeyRound },
   { href: "/admin/deployments", label: "模型部署", icon: Waypoints },
+  { href: "/admin/video-settings", label: "视频执行", icon: ServerCog },
   { href: "/admin/routing", label: "能力路由", icon: Network },
   { href: "/admin/playground", label: "测试台", icon: FlaskConical },
   { href: "/admin/invocations", label: "调用记录", icon: Activity },

@@ -55,12 +55,17 @@ class StoryboardUpdate(ApiModel):
 class GenerationRequest(ApiModel):
     project_id: str
     storyboard_version_id: str
+    shot_id: str | None = Field(default=None, min_length=1)
+    audio_asset_id: str | None = None
+    narration: bool = False
+    quality: Literal["preview", "standard"] = "standard"
+    confirm_video_cost: bool = False
 
 
 class AssetUploadIntentInput(ApiModel):
     project_id: str
     file_name: str = Field(min_length=1, max_length=255)
-    mime_type: str = Field(pattern=r"^(image|video|audio)/")
+    mime_type: str = Field(pattern=r"^(?:(?:image|video|audio)/.+|model/gltf-binary)$")
     size_bytes: int = Field(ge=1, le=50 * 1024 * 1024)
     sha256: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
 

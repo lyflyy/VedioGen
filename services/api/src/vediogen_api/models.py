@@ -53,6 +53,7 @@ class AdvisorRunRow(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
     status: Mapped[str] = mapped_column(String(30), default="completed")
     result: Mapped[dict[str, Any]] = mapped_column(JSON)
+    input_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     degraded: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
@@ -81,6 +82,8 @@ class GenerationRunRow(Base):
     shot_runs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     final_artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     cost_cny: Mapped[str] = mapped_column(String(20), default="0.0000")
+    request_data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
@@ -119,6 +122,25 @@ class ModelProviderRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
 
+class VideoSettingsRow(Base):
+    __tablename__ = "video_settings"
+
+    id: Mapped[str] = mapped_column(String(30), primary_key=True)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class AssetDiscoveryRow(Base):
+    __tablename__ = "asset_discoveries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    status: Mapped[str] = mapped_column(String(30))
+    request_data: Mapped[dict[str, Any]] = mapped_column(JSON)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class ModelCredentialRow(Base):
     __tablename__ = "model_credentials"
 
@@ -130,6 +152,14 @@ class ModelCredentialRow(Base):
     status: Mapped[str] = mapped_column(String(30), default="active")
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ModelCooldownRow(Base):
+    __tablename__ = "model_cooldowns"
+
+    credential_id: Mapped[str] = mapped_column(ForeignKey("model_credentials.id"), primary_key=True)
+    blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_code: Mapped[str] = mapped_column(String(40))
 
 
 class ModelDeploymentRow(Base):

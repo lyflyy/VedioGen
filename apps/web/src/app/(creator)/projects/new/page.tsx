@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { FormEvent, useState, useSyncExternalStore } from "react";
 
 import { Button } from "@/components/ui/button";
 import { post } from "@/lib/api";
@@ -19,7 +19,11 @@ import type { Project } from "@/lib/types";
 const sample =
   "张雪 800X 最酷视频：车辆 360 度环绕，聚焦灯组、发动机和轮胎细节，最后是穿皮衣的骑手高速驾驶镜头。";
 
+const subscribeHydration = () => () => {};
+
 export default function NewProjectPage() {
+  // Native input before hydration would be visible without updating controlled form state.
+  const hydrated = useSyncExternalStore(subscribeHydration, () => true, () => false);
   const router = useRouter();
   const [idea, setIdea] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -103,6 +107,7 @@ export default function NewProjectPage() {
             <span className="sr-only">视频想法</span>
             <textarea
               autoFocus
+              disabled={!hydrated}
               value={idea}
               onChange={(event) => setIdea(event.target.value)}
               placeholder={sample}
@@ -116,6 +121,7 @@ export default function NewProjectPage() {
               <span>添加照片或视频</span>
               <input
                 type="file"
+                disabled={!hydrated}
                 multiple
                 accept="image/*,video/*"
                 onChange={(event) =>
@@ -152,7 +158,7 @@ export default function NewProjectPage() {
               ))}
             </div>
           ) : null}
-          <fieldset className="project-options">
+          <fieldset className="project-options" disabled={!hydrated}>
             <legend>创作边界</legend>
             <label>
               <input
@@ -200,7 +206,7 @@ export default function NewProjectPage() {
               <Lightbulb size={16} />
               下一步将生成 3 个可比较方向
             </span>
-            <Button type="submit" disabled={!idea.trim() || submitting}>
+            <Button type="submit" disabled={!hydrated || !idea.trim() || submitting}>
               <Sparkles size={17} />
               {submitting
                 ? files.length

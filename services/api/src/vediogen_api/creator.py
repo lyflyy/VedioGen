@@ -1,8 +1,14 @@
 import asyncio
 import hashlib
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
+from decimal import Decimal
+
+from .fal_video import VideoProviderError
+from .generation import worker_has_run
+from .blender import validate_glb, matching_process
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -12,8 +18,10 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import SessionLocal, get_session
 from .fixtures import build_brief, build_project_facts, build_storyboard, timestamp
-from .gateway import ModelGatewayError, generate_creative_advice, generate_storyboard
-from .media import MediaGenerationError, create_preview_video
+from .gateway import ModelGatewayError, generate_storyboard
+from .advisor import create_advice
+from .generation import ACTIVE, build_plan, generation_lock, latest_shots, readiness, submit_run, live_blender_run
+from .media import MediaGenerationError
 from .models import AccountBriefRow, AdvisorRunRow, ArtifactRow, DocumentRow, GenerationRunRow, ModelDeploymentRow, ModelProviderRow, ProjectRow, RoutingVersionRow
 from .schemas import AccountBriefInput, ApprovalRequest, AssetUploadIntentInput, CreateBriefRequest, CreateProjectRequest, GenerationRequest, MessageRequest, StoryboardUpdate
 from .serializers import account_brief, advisor_run, artifact, document, generation_run, project
@@ -98,7 +106,7 @@ def create_project(payload: CreateProjectRequest, session: Session = Depends(get
                 "createdAt": timestamp(),
             }
         ],
-        facts=build_project_facts(project_id, payload.title, payload.initial_message),
+        facts=build_project_facts(project_id, payload.title, payload.initial_message, payload.target_platform),
     )
     session.add(row)
     session.commit()
@@ -135,6 +143,14 @@ async def upload_asset_content(upload_token: str, request: Request, session: Ses
 
     project_row = get_project_or_404(session, intent["projectId"])
     suffix = Path(intent["fileName"]).suffix.lower()[:10]
+    model_metadata = {}
+    if intent["mimeType"] == "model/gltf-binary":
+        if suffix != ".glb":
+            raise HTTPException(422, "三维素材仅支持 .glb")
+        try:
+            model_metadata = validate_glb(content)
+        except MediaGenerationError as error:
+            raise HTTPException(422, str(error)) from error
     target = get_settings().data_dir / "assets" / project_row.id / f"{intent['assetVersionId']}{suffix}"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(content)
@@ -151,6 +167,7 @@ async def upload_asset_content(upload_token: str, request: Request, session: Ses
         "uri": str(target.resolve()),
         "status": "ready",
         "createdAt": timestamp(),
+        **model_metadata,
     }
     project_row.asset_versions = [*project_row.asset_versions, asset_version]
     if project_row.messages:
@@ -185,26 +202,20 @@ def get_workspace(project_id: str, session: Session = Depends(get_session)) -> d
         "messages": row.messages,
         "facts": row.facts,
         "evidenceItems": row.evidence_items,
-        "assetVersions": row.asset_versions,
+        "assetVersions": [{key: value for key, value in asset.items() if key != "uri"} | {"previewUrl": f"/api/v1/projects/{project_id}/assets/{asset['id']}/content"} for asset in row.asset_versions],
         "latestAdvisorRunId": row.latest_advisor_run_id,
         "activeGenerationRunId": row.active_generation_run_id,
-        "generationReadiness": generation_readiness(session),
+        "generationReadiness": readiness(row, session.get(DocumentRow, row.current_storyboard_version_id) if row.current_storyboard_version_id else None),
     }
 
 
-def generation_readiness(session: Session) -> dict:
-    route = session.scalar(select(RoutingVersionRow).where(RoutingVersionRow.status == "published").order_by(RoutingVersionRow.version.desc()))
-    if not route:
-        return {"ready": False, "mode": "unavailable", "reason": "没有已发布的模型路由。"}
-    creative = next((item for item in route.bindings if item.get("capabilityAlias") == "creative-advisor"), None)
-    creative_deployment = session.get(ModelDeploymentRow, creative.get("primaryDeploymentId")) if creative else None
-    creative_provider = session.get(ModelProviderRow, creative_deployment.provider_id) if creative_deployment else None
-    if creative_provider and creative_provider.adapter_type == "fake":
-        return {"ready": True, "mode": "deterministic-test-preview", "reason": None}
-    video = next((item for item in route.bindings if item.get("capabilityAlias") == "video-generation"), None)
-    if not video:
-        return {"ready": False, "mode": "missing-video-provider", "reason": "脚本分镜已就绪，但尚未配置视频生成模型，不能生成真实动态镜头。"}
-    return {"ready": False, "mode": "video-adapter-pending", "reason": "视频模型路由已配置，但对应生成适配器尚未实现。"}
+@router.get("/projects/{project_id}/assets/{asset_id}/content", include_in_schema=False)
+def get_asset_content(project_id: str, asset_id: str, session: Session = Depends(get_session)) -> FileResponse:
+    row = get_project_or_404(session, project_id)
+    asset = next((item for item in row.asset_versions if item["id"] == asset_id), None)
+    if not asset or not Path(asset["uri"]).is_file():
+        raise HTTPException(status_code=404, detail="素材不存在")
+    return FileResponse(asset["uri"], media_type=asset["mimeType"])
 
 
 @router.post("/projects/{project_id}/messages", status_code=201)
@@ -241,18 +252,7 @@ async def stream_events(project_id: str) -> StreamingResponse:
 
 @router.post("/projects/{project_id}/advisor-runs", status_code=202)
 def create_advisor_run(project_id: str, session: Session = Depends(get_session)) -> dict:
-    row = get_project_or_404(session, project_id)
-    run_id = str(uuid4())
-    try:
-        result = generate_creative_advice(session, row)
-    except ModelGatewayError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
-    run = AdvisorRunRow(id=run_id, project_id=project_id, result=result, status="completed")
-    row.latest_advisor_run_id = run_id
-    row.status = "advising"
-    session.add(run)
-    session.commit()
-    return advisor_run(run)
+    return create_advice(session, project_id)
 
 
 @router.get("/advisor-runs/{advisor_run_id}")
@@ -300,8 +300,11 @@ def approve_brief(project_id: str, brief_id: str, payload: ApprovalRequest, sess
 
 
 @router.post("/projects/{project_id}/storyboard-runs", status_code=202)
-def create_storyboard(project_id: str, session: Session = Depends(get_session)) -> dict:
+def create_storyboard(project_id: str, background: bool = False, session: Session = Depends(get_session)) -> dict:
     project_row = get_project_or_404(session, project_id)
+    if background:
+        from .storyboard_jobs import enqueue
+        return enqueue(session, project_row)
     if not project_row.current_brief_version_id:
         raise HTTPException(status_code=409, detail="Approve a brief before generating a storyboard")
     version = (session.scalar(select(func.count()).select_from(DocumentRow).where(DocumentRow.project_id == project_id, DocumentRow.kind == "storyboard")) or 0) + 1
@@ -309,7 +312,9 @@ def create_storyboard(project_id: str, session: Session = Depends(get_session)) 
     try:
         storyboard_data = generate_storyboard(session, project_row, brief, version)
     except ModelGatewayError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+        headers = {"Retry-After": str(error.retry_after_seconds)} if error.retry_after_seconds else None
+        raise HTTPException(status_code=429 if error.code in {"RATE_LIMITED", "QUOTA_EXCEEDED"} else 502,
+                            detail=str(error), headers=headers) from error
     storyboard = DocumentRow(
         id=str(uuid4()),
         project_id=project_id,
@@ -332,12 +337,29 @@ def get_storyboard(project_id: str, storyboard_id: str, session: Session = Depen
 
 @router.put("/projects/{project_id}/storyboards/{storyboard_id}")
 def replace_storyboard(project_id: str, storyboard_id: str, payload: StoryboardUpdate, session: Session = Depends(get_session)) -> dict:
-    get_project_or_404(session, project_id)
-    row = get_document_or_404(session, storyboard_id, "storyboard", project_id)
-    row.data = {**row.data, "shots": payload.shots, "totalDurationMs": payload.total_duration_ms}
-    row.row_version += 1
-    session.commit()
-    return document(row)
+    with generation_lock:
+        project_row = get_project_or_404(session, project_id)
+        if session.scalar(select(GenerationRunRow.id).where(GenerationRunRow.project_id == project_id, GenerationRunRow.status.in_(ACTIVE))):
+            raise HTTPException(status_code=409, detail="生成期间暂不能修改分镜")
+        row = get_document_or_404(session, storyboard_id, "storyboard", project_id)
+        if not payload.shots or any(type(s.get("durationMs")) is not int or not 500 <= s["durationMs"] <= 15000 for s in payload.shots):
+            raise HTTPException(status_code=422, detail="需要有效镜头和 500 至 15000 毫秒的时长")
+        ids = [s.get("id") for s in payload.shots]
+        if any(not isinstance(value, str) for value in ids) or len(set(ids)) != len(ids):
+            raise HTTPException(status_code=422, detail="镜头 ID 缺失或重复")
+        total = sum(s["durationMs"] for s in payload.shots)
+        if total > 60000 or len(payload.shots) > 12:
+            raise HTTPException(status_code=422, detail="最多 12 个镜头，成片最长 60 秒")
+        shots, cursor = [], 0
+        for index, shot in enumerate(payload.shots, 1):
+            shots.append({**shot, "order": index, "startMs": cursor, "status": "draft"})
+            cursor += shot["durationMs"]
+        row.data = {**row.data, "shots": shots, "totalDurationMs": total, "status": "draft"}
+        row.status = "draft"
+        row.row_version += 1
+        project_row.status = "storyboard_draft"
+        session.commit()
+        return document(row)
 
 
 @router.post("/projects/{project_id}/storyboards/{storyboard_id}/approval", status_code=201)
@@ -353,70 +375,47 @@ def approve_storyboard(project_id: str, storyboard_id: str, payload: ApprovalReq
 
 @router.post("/generation-runs", status_code=202)
 def create_generation(payload: GenerationRequest, session: Session = Depends(get_session)) -> dict:
-    project_row = get_project_or_404(session, payload.project_id)
-    storyboard = get_document_or_404(session, payload.storyboard_version_id, "storyboard", payload.project_id)
-    if storyboard.status != "approved":
-        raise HTTPException(status_code=409, detail="Approve the storyboard before generation")
-    readiness = generation_readiness(session)
-    if not readiness["ready"]:
-        raise HTTPException(status_code=409, detail=readiness["reason"])
-    route = session.scalar(select(RoutingVersionRow).where(RoutingVersionRow.status == "published").order_by(RoutingVersionRow.version.desc()))
-    route_id = route.id if route else "00000000-0000-0000-0000-000000000001"
-    run_id = str(uuid4())
-    run = GenerationRunRow(
-        id=run_id,
-        project_id=payload.project_id,
-        storyboard_version_id=storyboard.id,
-        routing_policy_version_id=route_id,
-        status="running",
-        shot_runs=[
-            {
-                "id": str(uuid4()),
-                "generationRunId": run_id,
-                "shotId": shot["id"],
-                "attempt": 1,
-                "strategy": shot.get("sourceStrategy", "image-motion"),
-                "status": "succeeded",
-            }
-            for shot in storyboard.data["shots"]
-        ],
-    )
-    project_row.status = "generating"
-    project_row.active_generation_run_id = run_id
-    session.add(run)
-    session.flush()
-
-    artifact_id = str(uuid4())
-    target = get_settings().data_dir / "artifacts" / f"{artifact_id}.mp4"
-    try:
-        metadata = create_preview_video(target)
-    except MediaGenerationError as error:
-        run.status = "failed"
-        project_row.status = "needs_attention"
+    with generation_lock:
+        project_row = get_project_or_404(session, payload.project_id)
+        active = session.scalar(select(GenerationRunRow).where(GenerationRunRow.status.in_(ACTIVE)))
+        if active:
+            scope = "shot-preview" if payload.shot_id is not None else "full-video"
+            if (active.project_id == payload.project_id and active.storyboard_version_id == payload.storyboard_version_id
+                    and (active.request_data or {}).get("scope", "full-video") == scope
+                    and (payload.shot_id is None or active.request_data["shots"][0]["id"] == payload.shot_id)):
+                return generation_run(active)
+            raise HTTPException(status_code=409, detail="另一个生成任务正在执行，请稍后再试")
+        if live_blender_run(session):
+            raise HTTPException(409, "此前 Blender 进程仍在渲染，请恢复或停止原任务")
+        storyboard = get_document_or_404(session, payload.storyboard_version_id, "storyboard", payload.project_id)
+        for previous in session.scalars(select(GenerationRunRow).where(GenerationRunRow.project_id == payload.project_id)):
+            if previous.request_data and previous.request_data.get("video"):
+                for shot in latest_shots(previous):
+                    if shot.get("submissionState") in {"submitting", "unknown"} or (shot.get("providerHandle") and shot.get("providerStatus") not in {"COMPLETED", "FAILED"}):
+                        raise HTTPException(409, "项目存在未确认的上游视频任务，请先恢复原任务或在供应商后台核对")
+        if storyboard.status != "approved" and payload.shot_id is None:
+            raise HTTPException(status_code=409, detail="请先确认当前分镜")
+        try:
+            plan = build_plan(project_row, storyboard, payload.quality, payload.audio_asset_id, payload.narration, payload.shot_id)
+        except (ValueError, KeyError, TypeError, VideoProviderError, MediaGenerationError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if plan.get("video") and plan["video"].get("backend") != "comfyui" and not payload.confirm_video_cost:
+            raise HTTPException(status_code=422, detail="请先确认本次视频模型调用及估算费用")
+        run_id = str(uuid4())
+        run = GenerationRunRow(id=run_id, project_id=payload.project_id, storyboard_version_id=storyboard.id,
+            routing_policy_version_id="video-execution-v1" if plan.get("video") else "local-uploaded-media-v1", status="queued", request_data=plan,
+            shot_runs=[{"id": str(uuid4()), "shotId": shot["id"], "generationRunId": run_id,
+                        "purpose": shot.get("purpose", ""), "sourceAssetId": shot["sourceAssetId"],
+                        "strategy": shot["sourceStrategy"], "attempt": 1, "status": "queued", "artifactId": None}
+                       for shot in plan["shots"]])
+        if payload.shot_id is None:
+            project_row.active_generation_run_id = run.id
+            project_row.status = "generating"
+        session.add(run)
         session.commit()
-        raise HTTPException(status_code=502, detail=str(error)) from error
-    artifact_row = ArtifactRow(
-        id=artifact_id,
-        project_id=payload.project_id,
-        generation_run_id=run_id,
-        type="final-video",
-        mime_type="video/mp4",
-        path=str(target.resolve()),
-        **{
-            "size_bytes": metadata["sizeBytes"],
-            "sha256": metadata["sha256"],
-            "width": metadata["width"],
-            "height": metadata["height"],
-            "duration_ms": metadata["durationMs"],
-        },
-    )
-    run.final_artifact_id = artifact_id
-    run.status = "completed"
-    run.cost_cny = "0.0180"
-    project_row.status = "completed"
-    session.add(artifact_row)
-    session.commit()
-    return generation_run(run)
+        result = generation_run(run)
+        submit_run(run.id)
+        return result
 
 
 @router.get("/generation-runs/{run_id}")
@@ -427,30 +426,229 @@ def get_generation(run_id: str, session: Session = Depends(get_session)) -> dict
     return generation_run(row)
 
 
+@router.post("/generation-runs/{run_id}/recomposition", status_code=202)
+def recompose_generation(run_id: str, session: Session = Depends(get_session)):
+    from .generation import local_composition_shot
+    from .media import probe_media
+    with generation_lock:
+        prior = session.get(GenerationRunRow, run_id)
+        if not prior:
+            raise HTTPException(404, "生成任务不存在")
+        active = session.scalar(select(GenerationRunRow).where(GenerationRunRow.status.in_(ACTIVE)))
+        if active:
+            if (active.request_data or {}).get("sourceGenerationRunId") == run_id:
+                return generation_run(active)
+            raise HTTPException(409, "已有任务执行中，请等待完成")
+        if prior.status != "completed" or (prior.request_data or {}).get("scope") == "shot-preview" or ((prior.request_data or {}).get("video") or {}).get("backend") != "comfyui":
+            raise HTTPException(422, "需要已完成的本地 AI 视频任务")
+        request = deepcopy(prior.request_data)
+        shots, assets = [], {}
+        try:
+            for shot in request["shots"]:
+                attempt = next(s for s in latest_shots(prior) if s["shotId"] == shot["id"])
+                artifact_row = session.get(ArtifactRow, attempt["artifactId"])
+                if not artifact_row:
+                    raise MediaGenerationError("原镜头文件记录不存在，无法重新合成")
+                path = Path(artifact_row.path)
+                if shot["sourceStrategy"] == "image-to-video":
+                    path = path.with_suffix(".source.mp4")
+                    normalized = local_composition_shot(request, shot)
+                else:
+                    normalized = {**shot, "sourceStrategy": "user-video", "sourceStartMs": 0}
+                if not path.is_file():
+                    raise MediaGenerationError("原始生成片段已丢失，无法直接重新合成")
+                info = probe_media(path)
+                asset_id = str(uuid4())
+                assets[asset_id] = {"id": asset_id, "kind": "video", "uri": str(path), "status": "ready",
+                    "sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "durationMs": info["durationMs"], "sourceArtifactId": artifact_row.id}
+                shots.append({**normalized, "sourceAssetId": asset_id})
+        except (MediaGenerationError, OSError, KeyError, TypeError) as error:
+            raise HTTPException(422, str(error)) from error
+        request.update(shots=shots, assets=assets, video=None, blender=None, sourceGenerationRunId=run_id)
+        new_id = str(uuid4())
+        row = GenerationRunRow(id=new_id, project_id=prior.project_id, storyboard_version_id=prior.storyboard_version_id,
+            routing_policy_version_id="local-recomposition-v1", status="queued", request_data=request,
+            shot_runs=[{"id": str(uuid4()), "shotId": shot["id"], "generationRunId": new_id,
+                "purpose": shot.get("purpose", ""), "sourceAssetId": shot["sourceAssetId"], "strategy": "user-video",
+                "attempt": 1, "status": "queued", "artifactId": None} for shot in shots])
+        session.add(row)
+        project_row = session.get(ProjectRow, prior.project_id)
+        project_row.active_generation_run_id = row.id
+        project_row.status = "generating"
+        session.commit()
+        result = generation_run(row)
+        submit_run(row.id)
+        return result
+
+
+@router.get("/projects/{project_id}/storyboards/{storyboard_id}/shots/{shot_id}/preview")
+def get_shot_preview(project_id: str, storyboard_id: str, shot_id: str, session: Session = Depends(get_session)) -> dict:
+    project_row = get_project_or_404(session, project_id)
+    storyboard = get_document_or_404(session, storyboard_id, "storyboard", project_id)
+    if not any(shot.get("id") == shot_id for shot in storyboard.data.get("shots", [])):
+        raise HTTPException(404, "镜头不存在")
+    previous = next((row for row in session.scalars(select(GenerationRunRow).where(
+        GenerationRunRow.project_id == project_id, GenerationRunRow.storyboard_version_id == storyboard_id
+    ).order_by(GenerationRunRow.created_at.desc())) if (row.request_data or {}).get("scope") == "shot-preview"
+        and row.request_data["shots"][0]["id"] == shot_id), None)
+    try:
+        plan = build_plan(project_row, storyboard, "preview", shot_id=shot_id)
+        ready = {"ready": True, "mode": plan["mode"], "reason": None,
+                 "estimatedUsd": plan["video"]["estimatedUsd"] if plan.get("video") else None}
+    except (ValueError, KeyError, TypeError, VideoProviderError, MediaGenerationError) as error:
+        ready = {"ready": False, "mode": "capability-or-asset-missing", "reason": str(error)}
+    return {"run": generation_run(previous) if previous else None, "readiness": ready}
+
+
+@router.post("/generation-runs/{run_id}/adoption")
+def adopt_shot_preview(run_id: str, session: Session = Depends(get_session)) -> dict:
+    with generation_lock:
+        run = session.get(GenerationRunRow, run_id)
+        if not run:
+            raise HTTPException(404, "试片任务不存在")
+        if (run.request_data or {}).get("scope") != "shot-preview" or run.status != "completed":
+            raise HTTPException(409, "只能采用已完成的单镜头试片")
+        if session.scalar(select(GenerationRunRow.id).where(GenerationRunRow.project_id == run.project_id, GenerationRunRow.status.in_(ACTIVE))):
+            raise HTTPException(409, "生成期间暂不能采用试片")
+        project_row = get_project_or_404(session, run.project_id)
+        if project_row.current_storyboard_version_id != run.storyboard_version_id:
+            raise HTTPException(409, "当前分镜已更换，请在当前分镜重新试片")
+        storyboard = get_document_or_404(session, run.storyboard_version_id, "storyboard", run.project_id)
+        source = run.request_data["shots"][0]
+        current = next((shot for shot in storyboard.data["shots"] if shot["id"] == source["id"]), None)
+        result = latest_shots(run)[0]
+        media = session.get(ArtifactRow, result.get("artifactId"))
+        if not media or media.generation_run_id != run.id or media.shot_id != source["id"] or not Path(media.path).is_file():
+            raise HTTPException(409, "试片文件不存在")
+        if "sha256:" + hashlib.sha256(Path(media.path).read_bytes()).hexdigest() != media.sha256:
+            raise HTTPException(409, "试片文件已改变，请重新生成")
+        ignored = {"status", "order", "startMs"}
+        already = current and current.get("previewRunId") == run.id and current.get("sourceAssetId") == media.id
+        if not already and (not current or {k: v for k, v in current.items() if k not in ignored} != {k: v for k, v in source.items() if k not in ignored}):
+            raise HTTPException(409, "试片对应镜头已改变，请恢复原参数或重新试片；未覆盖当前编辑")
+        asset = next((asset for asset in project_row.asset_versions if asset["id"] == media.id), None)
+        if not asset:
+            asset = {"id": media.id, "projectId": run.project_id, "kind": "video", "fileName": f"shot-preview-{media.id}.mp4",
+                     "mimeType": "video/mp4", "sizeBytes": media.size_bytes, "sha256": media.sha256,
+                     "uri": media.path, "status": "ready", "width": media.width, "height": media.height,
+                     "durationMs": media.duration_ms, "referenceSource": "shot-preview", "generationRunId": run.id,
+                     "sourceAssetId": source["sourceAssetId"], "createdAt": timestamp()}
+            project_row.asset_versions = [*project_row.asset_versions, asset]
+        if not already:
+            storyboard.data = {**storyboard.data, "status": "draft", "shots": [
+                {**shot, "sourceStrategy": "user-video", "sourceAssetId": media.id, "sourceStartMs": 0,
+                 "fit": "contain", "previewRunId": run.id, "status": "draft"} if shot["id"] == source["id"] else shot
+                for shot in storyboard.data["shots"]]}
+            storyboard.status = "draft"
+            storyboard.row_version += 1
+            project_row.status = "storyboard_draft"
+            project_row.row_version += 1
+        session.commit()
+        return {"storyboard": document(storyboard), "assetVersion": {k: v for k, v in asset.items() if k != "uri"}
+                | {"previewUrl": f"/api/v1/projects/{run.project_id}/assets/{media.id}/content"}}
+
+
 @router.post("/generation-runs/{run_id}/cancellation", status_code=202)
 def cancel_generation(run_id: str, session: Session = Depends(get_session)) -> dict:
-    row = session.get(GenerationRunRow, run_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Generation run not found")
-    if row.status == "completed":
-        raise HTTPException(status_code=409, detail="Completed runs cannot be cancelled")
-    row.status = "cancelled"
-    session.commit()
-    return generation_run(row)
+    with generation_lock:
+        row = session.get(GenerationRunRow, run_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Generation run not found")
+        if row.status not in ACTIVE and not (row.status == "interrupted" and (row.request_data or {}).get("blender")):
+            raise HTTPException(status_code=409, detail="任务已结束")
+        row.status = "cancelled"
+        if (row.request_data or {}).get("blender"):
+            row.error_message = "已请求停止对应 Blender 进程，已完成的片段保留"
+        if row.request_data and row.request_data.get("video"):
+            row.error_message = ("已请求停止，后台将向本地服务发送定向取消；不会取消其他任务。"
+                                 if row.request_data["video"].get("backend") == "comfyui" else
+                                 "已停止本地等待；上游视频可能继续生成和计费。恢复任务将查询原任务，不重新提交。")
+        row.shot_runs = [{**shot, "status": "cancelled"} if shot["status"] in ACTIVE else shot for shot in row.shot_runs]
+        if (row.request_data or {}).get("scope") != "shot-preview":
+            session.get(ProjectRow, row.project_id).status = "needs_attention"
+        session.commit()
+        if (row.request_data or {}).get("blender") and not worker_has_run(row.id):
+            submit_run(row.id)
+        return generation_run(row)
 
 
 @router.post("/generation-runs/{run_id}/shots/{shot_id}/retries", status_code=202)
-def retry_shot(run_id: str, shot_id: str, session: Session = Depends(get_session)) -> dict:
-    row = session.get(GenerationRunRow, run_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Generation run not found")
-    current = next((shot for shot in row.shot_runs if shot["shotId"] == shot_id), None)
-    if not current:
-        raise HTTPException(status_code=404, detail="Shot run not found")
-    retry = {**current, "id": str(uuid4()), "attempt": current["attempt"] + 1, "status": "succeeded"}
-    row.shot_runs = [*row.shot_runs, retry]
-    session.commit()
-    return retry
+def retry_shot(run_id: str, shot_id: str, confirm_video_cost: bool = Query(False, alias="confirmVideoCost"), session: Session = Depends(get_session)) -> dict:
+    return _resume_generation(session, run_id, shot_id, confirm_video_cost)
+
+
+@router.post("/generation-runs/{run_id}/resumption", status_code=202)
+def resume_generation(run_id: str, session: Session = Depends(get_session)) -> dict:
+    return _resume_generation(session, run_id)
+
+
+def _resume_generation(session, run_id, shot_id=None, confirm_video_cost=False):
+    with generation_lock:
+        row = session.get(GenerationRunRow, run_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Generation run not found")
+        if not row.request_data:
+            raise HTTPException(status_code=409, detail="旧测试任务不能重做，请从分镜创建素材任务")
+        if worker_has_run(run_id):
+            raise HTTPException(status_code=409, detail="后台操作正在收尾，请稍后恢复")
+        if session.scalar(select(GenerationRunRow.id).where(GenerationRunRow.status.in_(ACTIVE))):
+            raise HTTPException(status_code=409, detail="已有任务执行中")
+        if live_blender_run(session, exclude=run_id):
+            raise HTTPException(409, "另一个 Blender 进程仍在执行，请先恢复或停止它")
+        if shot_id and not any(s["shotId"] == shot_id for s in row.shot_runs):
+            raise HTTPException(status_code=404, detail="Shot run not found")
+        if not shot_id and row.status == "completed":
+            raise HTTPException(status_code=409, detail="已完成任务无需恢复")
+        retries = []
+        for shot in latest_shots(row):
+            if shot["shotId"] != shot_id and shot["status"] == "succeeded":
+                continue
+            if shot["strategy"] == "blender-3d" and shot_id == shot["shotId"]:
+                if matching_process(shot.get("blenderHandle")):
+                    raise HTTPException(409, "原 Blender 进程仍在执行，请恢复或先停止，不重复渲染")
+                shot = {key: value for key, value in shot.items() if key not in {"blenderHandle", "blenderStarted", "blenderDirectory", "renderedFrames", "totalFrames"}}
+            if shot["strategy"] == "image-to-video" and row.request_data["video"].get("backend") == "comfyui":
+                if not get_settings().allow_local_models:
+                    raise HTTPException(422, "当前环境禁止本地模型访问")
+                if shot_id == shot["shotId"]:
+                    if shot.get("providerHandle"):
+                        from .comfy_video import ComfyVideoClient
+                        try:
+                            state, _ = ComfyVideoClient(row.request_data["video"]["localUrl"]).status(shot["providerHandle"]["requestId"])
+                        except VideoProviderError as error:
+                            raise HTTPException(422, str(error)) from error
+                        if state in {"RUNNING", "QUEUED"}:
+                            raise HTTPException(409, "本地原任务仍在执行，请继续查询或先取消")
+                    shot = {key: value for key, value in shot.items() if key not in {"providerHandle", "providerRequestId", "providerStatus", "submissionState", "seed", "elapsedSeconds"}}
+            elif shot["strategy"] == "image-to-video":
+                if shot.get("submissionState") in {"submitting", "unknown"} and not shot.get("providerHandle"):
+                    raise HTTPException(409, "提交结果不明，请先在供应商后台核对，不允许自动重提")
+                if shot_id == shot["shotId"] and shot.get("providerHandle") and shot.get("providerStatus") not in {"COMPLETED", "FAILED"}:
+                    raise HTTPException(409, "上游任务尚未完成，请使用继续任务查询原结果")
+                if shot_id == shot["shotId"] or shot.get("submissionState") == "rejected":
+                    if not confirm_video_cost:
+                        raise HTTPException(422, "重提视频镜头需再次确认费用，请点击该镜头重做")
+                    video = row.request_data["video"]
+                    source = next(s for s in row.request_data["shots"] if s["id"] == shot["shotId"])
+                    reserved = Decimal(video["reservedUsd"]) + Decimal(source["durationMs"]) / 1000 * Decimal(video["estimatedUsdPerSecond"])
+                    if reserved > Decimal(video["maxRunUsd"]):
+                        raise HTTPException(422, "重做后累计估算超过该任务预算，未提交新请求")
+                    row.request_data = {**row.request_data, "video": {**video, "reservedUsd": str(reserved)}}
+                    shot = {key: value for key, value in shot.items() if key not in {"providerHandle", "providerRequestId", "providerStatus", "submissionState"}}
+            retries.append({**shot, "id": str(uuid4()), "attempt": shot["attempt"] + 1, "status": "queued", "artifactId": None, "errorMessage": None})
+        row.shot_runs = [*row.shot_runs, *retries]
+        row.status = "queued"
+        row.final_artifact_id = None
+        row.error_message = None
+        project_row = session.get(ProjectRow, row.project_id)
+        if row.request_data.get("scope") != "shot-preview":
+            project_row.active_generation_run_id = row.id
+            project_row.status = "generating"
+        session.commit()
+        result = generation_run(row)
+        submit_run(row.id)
+        return result
 
 
 @router.get("/artifacts/{artifact_id}")

@@ -72,10 +72,41 @@ def test_structured_completion_sends_schema_and_image_and_records_usage(monkeypa
 
 def test_provider_error_is_sanitized_without_credential(monkeypatch):
     def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, json={"error": {"message": "invalid credential"}})
+        return httpx.Response(401, json={"error": {"message": "invalid credential: Authorization Bearer never-log-this-secret"}})
 
     install_transport(monkeypatch, handler)
     with pytest.raises(OpenAICompatibleError) as captured:
         list_models("https://relay.example/v1", "never-log-this-secret")
     assert captured.value.code == "AUTH_FAILED"
     assert "never-log-this-secret" not in str(captured.value)
+
+
+@pytest.mark.parametrize("header,expected", [("120", 120), ("1.5", 2), (None, 60), ("invalid", 60), ("NaN", 60), ("-10", 1)])
+def test_429_is_classified_without_retries_or_error_body_leak(monkeypatch, header, expected):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(429, headers={"Retry-After": header} if header else {},
+                              json={"error": {"message": "never-log-this-secret", "code": "rate_limit_exceeded"}})
+    install_transport(monkeypatch, handler)
+    with pytest.raises(OpenAICompatibleError) as caught:
+        list_models("https://relay.example/v1", "never-log-this-secret")
+    assert caught.value.code == "RATE_LIMITED"
+    assert caught.value.retry_after_seconds == expected
+    assert "never-log-this-secret" not in str(caught.value)
+    assert len(calls) == 1
+
+
+def test_retry_after_http_date():
+    from datetime import UTC, datetime, timedelta
+    from email.utils import format_datetime
+    header = format_datetime(datetime.now(UTC) + timedelta(seconds=90), usegmt=True)
+    assert 89 <= openai_compatible._retry_after(header) <= 90
+
+
+@pytest.mark.parametrize("code", ["insufficient_quota", "credit_balance_exhausted", "project_spend_limit_exceeded"])
+def test_quota_exhaustion_does_not_promise_time_based_recovery(code):
+    with pytest.raises(OpenAICompatibleError) as caught:
+        openai_compatible._raise_for_status(httpx.Response(429, json={"error": {"code": code}}))
+    assert caught.value.code == "QUOTA_EXCEEDED"
+    assert caught.value.retry_after_seconds is None

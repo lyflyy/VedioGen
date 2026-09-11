@@ -6,10 +6,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
+from . import model_backoff
 from .database import get_session
 from .fixtures import timestamp
 from .models import (
     ModelCredentialRow,
+    ModelCooldownRow,
     ModelDeploymentRow,
     ModelInvocationRow,
     ModelProviderRow,
@@ -93,7 +95,7 @@ def update_provider(provider_id: str, payload: dict, session: Session = Depends(
 @router.get("/model-credentials")
 def list_credentials(session: Session = Depends(get_session)) -> dict:
     rows = session.scalars(select(ModelCredentialRow).order_by(ModelCredentialRow.created_at.desc()))
-    return {"items": [credential(row) for row in rows]}
+    return {"items": [{**credential(row), "cooldown": model_backoff.info(session, row.id)} for row in rows]}
 
 
 @router.post("/model-credentials", status_code=201)
@@ -118,7 +120,10 @@ def create_credential(payload: CredentialInput, session: Session = Depends(get_s
 @router.post("/model-credentials/{credential_id}/probe")
 def probe_credential(credential_id: str, session: Session = Depends(get_session)) -> dict:
     row = credential_or_404(session, credential_id)
+    _check_cooldown(session, row.id)
     provider_row = provider_or_404(session, row.provider_id)
+    if provider_row.adapter_type == "fal-video":
+        return {"status": "not-run", "credentialId": row.id, "message": "fal 凭据需通过已确认费用的视频任务验证；此操作不发起付费请求"}
     try:
         value = secret_store.get(row.secret_ref)
     except (KeyError, ValueError):
@@ -131,10 +136,13 @@ def probe_credential(credential_id: str, session: Session = Depends(get_session)
         if provider_row.adapter_type == "fake":
             models, duration_ms = ["fixture-v1"], 1
         elif provider_row.adapter_type == "openai-compatible":
+            if not get_settings().allow_external_models:
+                raise OpenAICompatibleError("当前环境禁止外部模型调用", "ADAPTER_UNSUPPORTED")
             models, duration_ms = list_models(provider_row.base_url, value)
         else:
             raise OpenAICompatibleError(f"尚未实现适配器 {provider_row.adapter_type}", "ADAPTER_UNSUPPORTED")
     except OpenAICompatibleError as error:
+        _raise_limit_error(session, row.id, error)
         row.status = "error"
         session.commit()
         raise HTTPException(status_code=502, detail=str(error)) from error
@@ -157,8 +165,38 @@ def rotate_credential(credential_id: str, payload: dict, session: Session = Depe
     secret_store.put(row.secret_ref, secret)
     row.last_four = secret[-4:].rjust(4, "*")
     row.status = "active"
+    cooldown = session.get(ModelCooldownRow, row.id)
+    if cooldown:
+        session.delete(cooldown)
     session.commit()
     return credential(row)
+
+
+@router.post("/model-credentials/{credential_id}/cooldown-reset")
+def reset_cooldown(credential_id: str, session: Session = Depends(get_session)) -> dict:
+    credential_or_404(session, credential_id)
+    row = session.get(ModelCooldownRow, credential_id)
+    if row and row.error_code != "QUOTA_EXCEEDED":
+        _check_cooldown(session, credential_id)
+    if row:
+        session.delete(row)
+        session.commit()
+    return {"status": "cleared", "message": "调度已恢复；未调用或验证模型"}
+
+
+def _check_cooldown(session, credential_id):
+    try:
+        model_backoff.check(session, credential_id)
+    except OpenAICompatibleError as error:
+        headers = {"Retry-After": str(error.retry_after_seconds)} if error.retry_after_seconds else None
+        raise HTTPException(429, str(error), headers=headers) from error
+
+
+def _raise_limit_error(session, credential_id, error):
+    if error.code in {"RATE_LIMITED", "QUOTA_EXCEEDED"}:
+        model_backoff.record(session, credential_id, error)
+        headers = {"Retry-After": str(error.retry_after_seconds)} if error.retry_after_seconds else None
+        raise HTTPException(429, str(error), headers=headers) from error
 
 
 @router.post("/model-credentials/{credential_id}/revocation")
@@ -176,7 +214,7 @@ def revoke_credential(credential_id: str, session: Session = Depends(get_session
 @router.get("/model-deployments")
 def list_deployments(session: Session = Depends(get_session)) -> dict:
     rows = session.scalars(select(ModelDeploymentRow).order_by(ModelDeploymentRow.updated_at.desc()))
-    return {"items": [deployment(row) for row in rows]}
+    return {"items": [{**deployment(row), "cooldown": model_backoff.info(session, row.credential_id)} for row in rows]}
 
 
 @router.post("/model-deployments", status_code=201)
@@ -223,13 +261,23 @@ def update_deployment(deployment_id: str, payload: dict, session: Session = Depe
 @router.post("/model-deployments/{deployment_id}/probe")
 def probe_deployment(deployment_id: str, session: Session = Depends(get_session)) -> dict:
     row = deployment_or_404(session, deployment_id)
+    if provider_or_404(session, row.provider_id).adapter_type == "fal-video":
+        from .video_settings import resolve_deployment
+        from .fal_video import VideoProviderError
+        try:
+            resolve_deployment(session, deployment_id)
+        except VideoProviderError as error:
+            raise HTTPException(422, str(error)) from error
+        return {"status": "configuration-only", "deploymentId": row.id, "message": "本地配置有效；未验证付费生成能力"}
     credential_row = credential_or_404(session, row.credential_id)
     if credential_row.status != "active":
         raise HTTPException(status_code=409, detail="Credential is not active")
     provider_row = provider_or_404(session, row.provider_id)
+    _check_cooldown(session, credential_row.id)
     try:
         completion = _probe_deployment(provider_row, credential_row, row)
     except OpenAICompatibleError as error:
+        _raise_limit_error(session, credential_row.id, error)
         row.status = "error"
         session.commit()
         raise HTTPException(status_code=502, detail=str(error)) from error
@@ -333,9 +381,11 @@ def create_playground_run(payload: PlaygroundRunInput, session: Session = Depend
     deployment_row = deployment_or_404(session, binding["primaryDeploymentId"])
     provider_row = provider_or_404(session, deployment_row.provider_id)
     credential_row = credential_or_404(session, deployment_row.credential_id)
+    _check_cooldown(session, credential_row.id)
     try:
         completion = _probe_deployment(provider_row, credential_row, deployment_row)
     except OpenAICompatibleError as error:
+        _raise_limit_error(session, credential_row.id, error)
         raise HTTPException(status_code=502, detail=str(error)) from error
     invocation_row = ModelInvocationRow(
         id=str(uuid4()),
@@ -386,6 +436,8 @@ def _probe_deployment(
         return StructuredCompletion({"ok": True, "locale": "zh-CN"}, f"fake-{deployment_row.id[:8]}", deployment_row.physical_model_id, 8, 8, 1)
     if provider_row.adapter_type != "openai-compatible":
         raise OpenAICompatibleError(f"尚未实现适配器 {provider_row.adapter_type}", "ADAPTER_UNSUPPORTED")
+    if not get_settings().allow_external_models:
+        raise OpenAICompatibleError("当前环境禁止外部模型调用", "ADAPTER_UNSUPPORTED")
     models, _ = list_models(provider_row.base_url, api_key, min(deployment_row.timeout_seconds, 30))
     if deployment_row.physical_model_id not in models:
         raise OpenAICompatibleError(f"模型列表中不存在 {deployment_row.physical_model_id}", "MODEL_NOT_FOUND")

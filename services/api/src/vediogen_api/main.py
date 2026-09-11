@@ -6,6 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
 from .admin import router as admin_router
+from . import asset_discovery
+from . import storyboard_jobs
+from .asset_preparation import router as asset_preparation_router
+from .video_settings import router as video_settings_router
 from .admin import secret_store
 from .config import get_settings
 from .creator import router as creator_router
@@ -14,6 +18,8 @@ from .models import ModelCredentialRow, ModelDeploymentRow, ModelProviderRow, Ro
 
 
 def seed_local_provider() -> None:
+    if not get_settings().allow_fake_provider:
+        return
     with SessionLocal() as session:
         if session.get(ModelProviderRow, "local-fake"):
             return
@@ -74,11 +80,24 @@ async def lifespan(_: FastAPI):
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(engine)
     ensure_runtime_schema()
+    from .model_backoff import recover_interrupted_calls
+    with SessionLocal() as session:
+        recover_interrupted_calls(session)
     seed_local_provider()
-    yield
+    from .generation import start_worker, stop_worker
+    start_worker()
+    asset_discovery.start_worker()
+    storyboard_jobs.start_worker()
+    try:
+        yield
+    finally:
+        storyboard_jobs.stop_worker()
+        asset_discovery.stop_worker()
+        stop_worker()
 
 
 app = FastAPI(title="VedioGen Control API", version="0.1.0", lifespan=lifespan)
+app.include_router(storyboard_jobs.router, prefix="/api/v1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origins,
@@ -88,6 +107,9 @@ app.add_middleware(
 )
 app.include_router(creator_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
+app.include_router(asset_discovery.router, prefix="/api/v1")
+app.include_router(asset_preparation_router, prefix="/api/v1")
+app.include_router(video_settings_router, prefix="/api/v1")
 
 
 @app.get("/api/v1/health", tags=["Health"])

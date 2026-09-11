@@ -6,6 +6,8 @@
 
 ## 结论
 
+2026-09-06 实现核对：下表是 2026-09-05 的采用意向，不是已安装清单。当前 LLM 使用直接 OpenAI-compatible Adapter，未采用 LiteLLM、LangGraph 或 Vercel AI SDK；这些组件按实际复杂度再评估。可靠长任务已成为整改项，队列/Temporal 的最新评估门见[架构复核](../architecture/2026-09-06-architecture-review.md)，不再以“P0 延后”为由保留请求内执行。
+
 P0 采用主流框架和库完成基础能力，领域模型、确认流程和媒体契约由本项目维护。具体版本在脚手架创建当天根据兼容性测试锁入 lockfile；本文不提前写可能过期的版本号。
 
 ## Adopt

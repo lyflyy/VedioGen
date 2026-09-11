@@ -64,14 +64,22 @@ def advisor_run(row: models.AdvisorRunRow) -> dict:
 
 def generation_run(row: models.GenerationRunRow) -> dict:
     return {
+        "canRecompose": row.status == "completed" and (row.request_data or {}).get("scope") != "shot-preview" and ((row.request_data or {}).get("video") or {}).get("backend") == "comfyui",
         "id": row.id,
         "projectId": row.project_id,
         "storyboardVersionId": row.storyboard_version_id,
         "routingPolicyVersionId": row.routing_policy_version_id,
         "status": row.status,
-        "shotRuns": row.shot_runs,
+        "shotRuns": [{k: v for k, v in shot.items() if k != "providerHandle"} for shot in row.shot_runs],
         "finalArtifactId": row.final_artifact_id,
-        "costCny": row.cost_cny,
+        "scope": (row.request_data or {}).get("scope", "full-video"),
+        "costCny": None if row.request_data else row.cost_cny,
+        "costStatus": "unavailable",
+        "errorMessage": row.error_message,
+        "mode": (row.request_data or {}).get("mode", "uploaded-media" if row.request_data else "legacy-test-preview"),
+        "estimatedUsd": ((row.request_data or {}).get("video") or {}).get("reservedUsd"),
+        "output": (row.request_data or {}).get("output"),
+        "audioMode": (row.request_data or {}).get("audioMode", "unknown"),
         "createdAt": iso(row.created_at),
         "updatedAt": iso(row.updated_at),
     }

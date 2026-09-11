@@ -22,13 +22,15 @@ def get_session() -> Generator[Session, None, None]:
 
 
 def ensure_runtime_schema() -> None:
-    """Apply the two additive columns needed by pre-migration local databases."""
-    columns = {column["name"] for column in inspect(engine).get_columns("model_invocations")}
-    additions = {
-        "provider_request_id": "VARCHAR(255)",
-        "provider_model_id": "VARCHAR(200)",
+    """Keep existing local MVP databases readable with additive changes only."""
+    tables = {
+        "model_invocations": {"provider_request_id": "VARCHAR(255)", "provider_model_id": "VARCHAR(200)"},
+        "generation_runs": {"request_data": "JSON", "error_message": "TEXT"},
+        "advisor_runs": {"input_fingerprint": "VARCHAR(64)"},
     }
     with engine.begin() as connection:
-        for name, sql_type in additions.items():
-            if name not in columns:
-                connection.exec_driver_sql(f"ALTER TABLE model_invocations ADD COLUMN {name} {sql_type}")
+        for table, additions in tables.items():
+            columns = {column["name"] for column in inspect(connection).get_columns(table)}
+            for name, sql_type in additions.items():
+                if name not in columns:
+                    connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")

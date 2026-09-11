@@ -1,6 +1,9 @@
 import base64
 import json
+import math
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -9,9 +12,10 @@ import httpx
 
 
 class OpenAICompatibleError(RuntimeError):
-    def __init__(self, message: str, code: str = "PROVIDER_ERROR") -> None:
+    def __init__(self, message: str, code: str = "PROVIDER_ERROR", retry_after_seconds: int | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.retry_after_seconds = retry_after_seconds
 
 
 @dataclass(frozen=True)
@@ -142,16 +146,32 @@ def _headers(api_key: str) -> dict[str, str]:
 def _raise_for_status(response: httpx.Response) -> None:
     if response.is_success:
         return
+    if response.status_code == 429:
+        try:
+            error = response.json().get("error", {})
+            quota = {"insufficient_quota", "credit_balance_exhausted", "billing_hard_limit_reached",
+                     "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "organization_usage_limit_exceeded"}
+            exhausted = isinstance(error, dict) and any(error.get(key) in quota for key in ("code", "type") if isinstance(error.get(key), str))
+        except (ValueError, AttributeError):
+            exhausted = False
+        if exhausted:
+            raise OpenAICompatibleError("模型平台返回 HTTP 429：额度或余额不足，已暂停此凭据；请检查中转站额度并在管理后台更新凭据后重试", "QUOTA_EXCEEDED")
+        seconds = _retry_after(response.headers.get("retry-after"))
+        raise OpenAICompatibleError(f"模型平台返回 HTTP 429：请求受限，已暂停此凭据 {seconds} 秒；稍后手动重试", "RATE_LIMITED", seconds)
     code = "AUTH_FAILED" if response.status_code in {401, 403} else "PROVIDER_UNAVAILABLE"
-    detail = ""
+    # Providers may echo Authorization or private request text in their errors.
+    raise OpenAICompatibleError(f"模型平台返回 HTTP {response.status_code}", code)
+
+
+def _retry_after(value: str | None) -> int:
+    if not value:
+        return 60
     try:
-        payload = response.json()
-        error = payload.get("error") if isinstance(payload, dict) else None
-        if isinstance(error, dict):
-            detail = str(error.get("message") or "")
-        elif error:
-            detail = str(error)
+        seconds = float(value)
     except ValueError:
-        pass
-    suffix = f"：{detail[:240]}" if detail else ""
-    raise OpenAICompatibleError(f"模型平台返回 HTTP {response.status_code}{suffix}", code)
+        try:
+            date = parsedate_to_datetime(value)
+            seconds = (date.replace(tzinfo=date.tzinfo or UTC) - datetime.now(UTC)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return 60
+    return max(1, math.ceil(seconds)) if math.isfinite(seconds) and seconds <= 31536000 else 60

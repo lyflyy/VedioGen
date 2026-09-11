@@ -6,22 +6,12 @@ def timestamp() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def build_project_facts(project_id: str, title: str, message: str) -> list[dict]:
-    vehicle = "春风 800MT" if "800MT" in message.upper().replace(" ", "") else title
+def build_project_facts(project_id: str, title: str, message: str, platform: str = "douyin") -> list[dict]:
     return [
         {
             "id": str(uuid4()),
-            "key": "subject.vehicle.name",
-            "value": vehicle,
-            "sourceType": "user-message",
-            "sourceId": project_id,
-            "confidence": 1,
-            "status": "confirmed",
-        },
-        {
-            "id": str(uuid4()),
             "key": "output.platform",
-            "value": "douyin",
+            "value": platform,
             "sourceType": "user-confirmation",
             "sourceId": project_id,
             "confidence": 1,

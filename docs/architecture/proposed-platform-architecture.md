@@ -1,8 +1,12 @@
 # 候选平台架构
 
+> 2026-09-06 范围收敛：用户要求企业内部 MVP、80 分视频优先。本文描述长期组件边界，不要求首期全部实现；当前按[内部 MVP 计划](../plans/2026-09-06-internal-mvp-reset.md)采用单机、轻量任务与单一视频适配器。
+
 - 状态：草案
-- 更新日期：2026-09-05
+- 更新日期：2026-09-06
 - 前置条件：首期用户与真实车型要求已确认；资产来源、时延和成本尚待确认
+
+本文是目标架构，不是功能完成清单。当前实现差距与增量调整见 [2026-09-06 架构复核](2026-09-06-architecture-review.md)。
 
 ## 设计原则
 
@@ -67,7 +71,7 @@ flowchart LR
 
 ### 模型网关与管理面
 
-业务服务只按 `creative-advisor`、`storyboard-director` 等能力别名调用项目自己的 ModelGateway。P0 使用 LiteLLM SDK 适配不同大模型平台；Provider、API Key、物理模型和主备路由通过内部 `/admin` 管理界面配置。
+业务服务只按 `creative-advisor`、`storyboard-generator` 等能力别名调用项目自己的 ModelGateway。当前 P0 使用直接 OpenAI-compatible Adapter；LiteLLM 是增加异构 Provider 时的评估候选，尚非运行依赖。Provider、API Key、物理模型和主备路由通过内部 `/admin` 管理界面配置；策略执行与实测能力仍需补齐。
 
 路由采用 Draft、探针、发布和回滚流程。每个运行保存 RoutingPolicyVersion 快照，发布新配置只影响新请求。Key 只写入服务端 Secret Store，数据库保存引用，浏览器和日志不回显明文。完整设计见[模型接入规格](../specs/model-provider-routing.md)和[模型管理后台体验规格](../specs/model-management-console.md)。
 
@@ -142,7 +146,7 @@ FFmpeg 负责片段拼接、缩放、编码、音频混合和响度处理。动�
 
 ## Shot Manifest
 
-Shot Manifest 是控制面和媒体 Worker 的中央契约，后续需要单独建立 JSON Schema。建议字段包括：
+Shot Manifest 是控制面和媒体 Worker 的中央契约，已有 [JSON Schema](../specs/shot-manifest.schema.json)，下一步需要落实运行时校验与执行。字段包括：
 
 - `schemaVersion`、`projectId`、`runId`、`shotId`。
 - 内容包 ID/版本与渲染策略，例如 `blender-3d`、`generated-video`、`image-motion`、`stock-video` 或 `avatar`。

@@ -8,6 +8,12 @@ info:
   description: |
     P0 创作主链路和内部模型管理后台的控制面 API。
     长任务返回 Run ID，通过事件流或查询接口获取状态。
+    2026-09-06 内部素材执行增量以 internal-media-execution.md 与运行时 /openapi.json 为准；
+    2026-09-07 图生视频配置、费用确认与恢复增量见 internal-video-execution.md；本地 ComfyUI 配置与执行增量见 local-comfy-video.md。
+    2026-09-07 文字到参考素材准备接口见 text-reference-preparation.md。
+    2026-09-07 逐镜头参考图裁剪接口见 reference-image-framing.md 与运行时 /openapi.json。
+    2026-09-07 GLB 上传、Blender 后台配置与环绕执行见 local-blender-execution.md 与运行时 /openapi.json。
+    旧版幂等 Header、审批和响应示例并非当前 MVP 全部实现。
 servers:
   - url: /api/v1
 tags:
@@ -277,6 +283,13 @@ paths:
   /projects/{projectId}/advisor-runs:
     post:
       summary: Start or revise Creative Advisor proposals
+      description: >-
+        Internal MVP currently waits for completion before returning 202.
+        Same-project requests with identical input share an in-process invocation
+        and reuse the latest successful fingerprinted result. Changed input during
+        an active request returns 409. This is not a durable background job;
+        in-flight deduplication requires a single API process. See
+        discussions/2026-09-07-advisor-request-deduplication.md.
       tags: [Advisor]
       operationId: createAdvisorRun
       security:
@@ -303,7 +316,7 @@ paths:
                     type: string
       responses:
         "202":
-          description: Advisor run queued
+          description: Completed or reused Advisor run (current MVP)
           content:
             application/json:
               schema:
@@ -407,35 +420,95 @@ paths:
 
   /projects/{projectId}/storyboard-runs:
     post:
-      summary: Generate a Storyboard draft
+      summary: Prepare materials and generate a Storyboard draft
+      description: >-
+        Internal MVP reads the current approved brief. background=true returns a persistent
+        script-preparation task immediately; duplicate active requests join the same task.
+        Default false retains the legacy synchronous response for compatibility.
       tags: [Storyboards]
       operationId: generateStoryboard
       security:
         - userSession: []
       parameters:
         - $ref: "#/components/parameters/ProjectId"
-        - $ref: "#/components/parameters/IdempotencyKey"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [creativeBriefVersionId]
-              properties:
-                creativeBriefVersionId:
-                  $ref: "#/components/schemas/Uuid"
-                instruction:
-                  type: string
-                  maxLength: 1000
+        - name: background
+          in: query
+          schema: { type: boolean, default: false }
       responses:
         "202":
-          description: Storyboard generation queued
+          description: Persistent task for background=true; completed legacy result otherwise
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AsyncRun"
+                type: object
+                required: [id, status]
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}/storyboard-runs/latest:
+    get:
+      summary: Restore the latest script preparation task
+      tags: [Storyboards]
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: Run or null; phases, timestamps, warnings and terminal error are persisted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run]
+                properties:
+                  run:
+                    type: [object, "null"]
+                    additionalProperties: true
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}/storyboards/{storyboardVersionId}/auto-materials:
+    post:
+      summary: Prepare official reference images and match unbound image shots
+      description: Does not replace manual bindings or complex shot strategies. Concurrent storyboard edits return 409.
+      tags: [Storyboards]
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/StoryboardVersionId"
+      responses:
+        "200":
+          description: Updated draft including shots and materialWarnings
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}/storyboards/{storyboardVersionId}/readiness:
+    get:
+      summary: Check each shot against the real execution plan
+      tags: [Storyboards]
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/StoryboardVersionId"
+      responses:
+        "200":
+          description: Execution readiness, not semantic or cinematic quality approval
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ready, shots]
+                properties:
+                  ready: { type: boolean }
+                  shots:
+                    type: array
+                    items:
+                      type: object
+                      required: [shotId, ready, reason]
+                      properties:
+                        shotId: { type: string }
+                        ready: { type: boolean }
+                        reason: { type: [string, "null"] }
         default:
           $ref: "#/components/responses/Error"
 
@@ -517,7 +590,7 @@ paths:
 
   /generation-runs:
     post:
-      summary: Start generation for an approved Storyboard
+      summary: Start approved full-video generation or a single-shot draft preview
       tags: [Generation]
       operationId: createGenerationRun
       security:
@@ -537,6 +610,23 @@ paths:
                   $ref: "#/components/schemas/Uuid"
                 storyboardVersionId:
                   $ref: "#/components/schemas/Uuid"
+                shotId:
+                  type: [string, "null"]
+                  minLength: 1
+                  description: If provided, render only this shot without composing or completing the project. Narration and background audio must be absent.
+                quality:
+                  type: string
+                  enum: [preview, standard]
+                  default: standard
+                audioAssetId:
+                  type: [string, "null"]
+                narration:
+                  type: boolean
+                  default: false
+                  description: Generate local Piper speech from confirmed shot voiceover text.
+                confirmVideoCost:
+                  type: boolean
+                  default: false
       responses:
         "202":
           description: Generation queued
@@ -565,6 +655,62 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/GenerationRunDetail"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /projects/{projectId}/storyboards/{storyboardVersionId}/shots/{shotId}/preview:
+    get:
+      summary: Get saved-shot readiness and latest standalone preview
+      tags: [Generation]
+      operationId: getShotPreview
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/StoryboardVersionId"
+        - $ref: "#/components/parameters/ShotId"
+      responses:
+        "200":
+          description: Readiness and latest preview; does not submit a model request
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [readiness, run]
+                properties:
+                  readiness:
+                    type: object
+                    required: [ready, mode]
+                    properties:
+                      ready: {type: boolean}
+                      mode: {type: string}
+                      reason: {type: [string, "null"]}
+                      estimatedUsd: {type: [string, "null"]}
+                  run:
+                    oneOf:
+                      - $ref: "#/components/schemas/GenerationRunDetail"
+                      - type: "null"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /generation-runs/{generationRunId}/adoption:
+    post:
+      summary: Adopt a completed preview into its unchanged current shot
+      tags: [Generation]
+      operationId: adoptShotPreview
+      parameters:
+        - $ref: "#/components/parameters/GenerationRunId"
+      responses:
+        "200":
+          description: Updated storyboard and video asset metadata without a local filesystem path
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [storyboard, assetVersion]
+                properties:
+                  storyboard: {type: object}
+                  assetVersion: {type: object}
+        "409":
+          $ref: "#/components/responses/Conflict"
         default:
           $ref: "#/components/responses/Error"
 
@@ -645,7 +791,7 @@ paths:
                   maxLength: 255
                 mimeType:
                   type: string
-                  pattern: "^(image|video|audio)/"
+                  pattern: "^(?:(?:image|video|audio)/.+|model/gltf-binary)$"
                 sizeBytes:
                   type: integer
                   minimum: 1
@@ -1671,7 +1817,7 @@ components:
           type: integer
           minimum: 1
         kind:
-          enum: [image, video, audio, document]
+          enum: [image, video, audio, model, document]
         sourceType:
           enum: [user-upload, generated, extracted]
         mimeType:
@@ -1806,6 +1952,10 @@ components:
       type: object
       required: [id, projectId, storyboardVersionId, status, routingPolicyVersionId, createdAt]
       properties:
+        scope:
+          type: string
+          enum: [full-video, shot-preview]
+          description: A completed shot-preview is not a completed project and has no finalArtifactId.
         id:
           $ref: "#/components/schemas/Uuid"
         projectId:

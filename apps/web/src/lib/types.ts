@@ -29,10 +29,18 @@ export interface Workspace {
   messages: Array<{ id: string; role: string; text: string; createdAt: string }>;
   facts: Array<{ id: string; key: string; value: unknown; status: string; confidence: number }>;
   evidenceItems: unknown[];
-  assetVersions: unknown[];
+  assetVersions: AssetVersion[];
   latestAdvisorRunId: string | null;
   activeGenerationRunId: string | null;
-  generationReadiness: { ready: boolean; mode: string; reason: string | null };
+  generationReadiness: { ready: boolean; mode: string; reason: string | null; estimatedUsd?: string | null };
+}
+
+export interface AssetVersion {
+  id: string;
+  fileName: string;
+  kind: "image" | "video" | "audio" | "model";
+  mimeType: string;
+  previewUrl: string;
 }
 
 export interface Proposal {
@@ -88,15 +96,26 @@ export interface Shot {
   startMs: number;
   durationMs: number;
   visual: string;
+  subject?: string;
+  action?: string;
+  scene?: string;
   camera: string;
   voiceover: string;
   caption: string;
   sound: string;
   sourceStrategy: string;
+  blenderTemplate?: "orbit-360" | "";
+  sourceAssetId?: string;
+  sourceStartMs?: number;
+  videoPrompt?: string;
+  continuity?: string[];
+  fit?: "contain" | "cover";
   status: string;
 }
 
 export interface Storyboard {
+  rowVersion?: number;
+  materialWarnings?: string[];
   id: string;
   version: number;
   status: string;
@@ -107,12 +126,18 @@ export interface Storyboard {
 }
 
 export interface GenerationRun {
+  canRecompose?: boolean;
+  scope?: "full-video" | "shot-preview";
+  estimatedUsd?: string | null;
   id: string;
   status: string;
   storyboardVersionId: string;
-  shotRuns: Array<{ id: string; shotId: string; attempt: number; strategy: string; status: string }>;
+    shotRuns: Array<{ id: string; shotId: string; attempt: number; strategy: string; status: string; purpose?: string; artifactId?: string | null; errorMessage?: string | null; providerRequestId?: string; providerStatus?: string; renderedFrames?: number; totalFrames?: number }>;
   finalArtifactId: string | null;
-  costCny: string;
+  costCny: string | null;
+  errorMessage: string | null;
+  mode: string;
+  audioMode: string;
 }
 
 export interface Artifact {
@@ -138,6 +163,7 @@ export interface Provider {
 }
 
 export interface Credential {
+  cooldown?: { errorCode: string; message: string; retryAfterSeconds: number | null } | null;
   id: string;
   providerId: string;
   alias: string;
@@ -147,6 +173,7 @@ export interface Credential {
 }
 
 export interface Deployment {
+  cooldown?: Credential["cooldown"];
   id: string;
   displayName: string;
   providerId: string;

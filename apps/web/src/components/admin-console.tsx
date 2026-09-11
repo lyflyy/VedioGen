@@ -39,11 +39,13 @@ type Section =
   | "model-providers"
   | "credentials"
   | "deployments"
+  | "video-settings"
   | "routing"
   | "playground"
   | "invocations";
 
 const sectionMeta: Record<Section, { title: string; description: string }> = {
+  "video-settings": { title: "视频执行", description: "图生视频部署与单任务估算预算" },
   "model-providers": {
     title: "模型平台",
     description: "维护兼容接口和适配器，不在业务流程中绑定具体厂商。",
@@ -81,11 +83,11 @@ export function AdminConsole({ section }: { section: string }) {
           <h1>{sectionMeta[current].title}</h1>
           <p>{sectionMeta[current].description}</p>
         </div>
-        <Status value="active" />
       </header>
       {current === "model-providers" ? <ProvidersPanel /> : null}
       {current === "credentials" ? <CredentialsPanel /> : null}
       {current === "deployments" ? <DeploymentsPanel /> : null}
+      {current === "video-settings" ? <VideoSettingsPanel /> : null}
       {current === "routing" ? <RoutingPanel /> : null}
       {current === "playground" ? <PlaygroundPanel /> : null}
       {current === "invocations" ? <InvocationsPanel /> : null}
@@ -133,6 +135,117 @@ function PanelState({ loading, error }: { loading: boolean; error: string }) {
       </div>
     );
   return null;
+}
+
+type VideoSettings = {
+  enabled: boolean;
+  backend: "fal" | "comfyui";
+  localUrl: string;
+  width: number;
+  height: number;
+  steps: number;
+  timeoutSeconds: number;
+  deploymentId: string | null;
+  estimatedUsdPerSecond: string;
+  maxRunUsd: string;
+  externalCallsAllowed: boolean;
+  localCallsAllowed: boolean;
+  narrationEnabled: boolean;
+  narrationModelPath: string;
+  blenderEnabled: boolean;
+  blenderExecutable: string;
+  blenderTimeoutSeconds: number;
+};
+
+function VideoSettingsPanel() {
+  const settings = useResource<VideoSettings>("/admin/video-settings");
+  const deployments = useResource<{ items: Deployment[] }>("/admin/model-deployments");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [backend, setBackend] = useState<"fal" | "comfyui" | null>(null);
+  const local = (backend ?? settings.data?.backend) === "comfyui";
+  const [probe, setProbe] = useState<{ ready: boolean; missing: string[]; version: string | null } | null>(null);
+  async function checkBlender() {
+    setBusy(true);
+    setMessage("");
+    try {
+      const result = await post<{ version: string }>("/admin/video-settings/blender-probe", {});
+      setMessage(`${result.version} · 可执行文件检查通过`);
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Blender 检查失败"); }
+    finally { setBusy(false); }
+  }
+  async function checkLocal() {
+    setBusy(true);
+    setMessage("");
+    setProbe(null);
+    try { setProbe(await post("/admin/video-settings/local-probe", {})); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "检查失败"); }
+    finally { setBusy(false); }
+  }
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setMessage("");
+    try {
+      await api("/admin/video-settings", { method: "PUT", body: JSON.stringify({
+        enabled: form.get("enabled") === "on", deploymentId: form.get("deploymentId") || null,
+        backend: local ? "comfyui" : "fal",
+        localUrl: form.get("localUrl") ?? settings.data?.localUrl,
+        width: Number(form.get("width") ?? settings.data?.width), height: Number(form.get("height") ?? settings.data?.height),
+        steps: Number(form.get("steps") ?? settings.data?.steps), timeoutSeconds: Number(form.get("timeoutSeconds") ?? settings.data?.timeoutSeconds),
+        estimatedUsdPerSecond: form.get("price") ?? settings.data?.estimatedUsdPerSecond,
+        maxRunUsd: form.get("budget") ?? settings.data?.maxRunUsd,
+        narrationEnabled: form.get("narrationEnabled") === "on",
+        narrationModelPath: form.get("narrationModelPath") || "",
+        blenderEnabled: form.get("blenderEnabled") === "on",
+        blenderExecutable: form.get("blenderExecutable") || "",
+        blenderTimeoutSeconds: Number(form.get("blenderTimeoutSeconds")),
+      }) });
+      await settings.reload();
+      setProbe(null);
+      setMessage(local ? "配置已保存；尚未验证真实推理。" : "配置已保存；尚未执行付费生成验证。");
+    } catch (error) { setMessage(error instanceof Error ? error.message : "保存失败"); }
+    finally { setBusy(false); }
+  }
+  return <AdminPanel icon={ServerCog} title="图生视频">
+    <PanelState loading={settings.loading || deployments.loading} error={settings.error || deployments.error} />
+    {settings.data && !settings.loading && !deployments.loading && !deployments.error ? <form className="admin-form video-settings-form" onSubmit={submit}>
+      <label>执行方式<select value={local ? "comfyui" : "fal"} onChange={(event) => { setBackend(event.target.value as "fal" | "comfyui"); setProbe(null); setMessage(""); }} disabled={busy}>
+        <option value="comfyui">本地 ComfyUI · Wan 2.2</option><option value="fal">云端 fal · Kling</option>
+      </select></label>
+      {local ? <>
+        <label>本地服务地址<input name="localUrl" type="url" required defaultValue={settings.data.localUrl} /></label>
+        <label>原生宽度<input name="width" type="number" min="256" max="832" step="32" required defaultValue={settings.data.width} /></label>
+        <label>原生高度<input name="height" type="number" min="256" max="832" step="32" required defaultValue={settings.data.height} /></label>
+        <label>采样步数<input name="steps" type="number" min="4" max="30" required defaultValue={settings.data.steps} /></label>
+        <label>等待上限（秒）<input name="timeoutSeconds" type="number" min="300" max="7200" required defaultValue={settings.data.timeoutSeconds} /></label>
+      </> : <>
+      <label>执行部署<select name="deploymentId" defaultValue={settings.data.deploymentId ?? ""}>
+        <option value="">尚未配置</option>
+        {deployments.data?.items.filter((item) => item.capabilities.includes("image-to-video")).map((item) => <option key={item.id} value={item.id}>{item.displayName}</option>)}
+      </select></label>
+      <label>参考单价（USD / 秒）<input name="price" type="number" required min="0" max="100" step="0.0001" defaultValue={settings.data.estimatedUsdPerSecond} /></label>
+      <label>单任务累计估算上限（USD）<input name="budget" type="number" required min="0" max="1000" step="0.0001" defaultValue={settings.data.maxRunUsd} /></label>
+      </>}
+      <label className="video-enabled"><input name="enabled" type="checkbox" defaultChecked={settings.data.enabled} />{local ? "启用本地视频生成" : "启用付费视频调用"}</label>
+      <label className="narration-model">中文声音模型路径<input name="narrationModelPath" maxLength={1024} defaultValue={settings.data.narrationModelPath} /></label>
+      <label className="video-enabled"><input name="narrationEnabled" type="checkbox" defaultChecked={settings.data.narrationEnabled} />启用本地 Piper 旁白</label>
+      <label className="admin-form-wide">Blender 可执行文件<input name="blenderExecutable" maxLength={1024} defaultValue={settings.data.blenderExecutable} /></label>
+      <label>Blender 超时（秒）<input name="blenderTimeoutSeconds" type="number" min="60" max="7200" required defaultValue={settings.data.blenderTimeoutSeconds} /></label>
+      <label className="video-enabled"><input name="blenderEnabled" type="checkbox" defaultChecked={settings.data.blenderEnabled} />启用 Blender 环绕</label>
+      <Button type="submit" disabled={busy}><Check size={16} />保存视频配置</Button>
+      <Button type="button" variant="secondary" disabled={busy} onClick={() => void checkBlender()}><FlaskConical size={16} />检查已保存的 Blender</Button>
+      {local ? <Button type="button" variant="secondary" disabled={busy} onClick={() => void checkLocal()}><FlaskConical size={16} />检查已保存的本地配置</Button> : null}
+    </form> : null}
+    <div className="video-settings-notes">
+    <p>配置状态：{settings.data?.enabled ? "已启用" : "未启用"} · 真实生成尚待验证</p>
+    <p>{local ? "本地推理 · 无视频 API 费用 · 消耗本机 GPU 与运行时间" : "费用为管理员参考单价估算，实际扣费以供应商账单为准。"}</p>
+    {settings.data && !(local ? settings.data.localCallsAllowed : settings.data.externalCallsAllowed) ? <p role="status">{local ? "当前环境禁止本地模型访问。" : "当前环境禁止外部调用。"}</p> : null}
+    {probe ? <div role="status"><p>{probe.ready ? "服务与模型清单就绪，实际推理尚待验证" : "本地依赖未就绪"} · ComfyUI {probe.version ?? "未知版本"}</p>{probe.missing.length ? <ul>{probe.missing.map((item) => <li key={item}>{item}</li>)}</ul> : null}</div> : null}
+    {message ? <p role="status">{message}</p> : null}
+    </div>
+  </AdminPanel>;
 }
 
 function ProvidersPanel() {
@@ -198,6 +311,7 @@ function ProvidersPanel() {
             适配器
             <select name="adapterType">
               <option value="openai-compatible">OpenAI Compatible</option>
+              <option value="fal-video">fal 视频队列</option>
               <option value="anthropic">Anthropic</option>
               <option value="fake">Fake Provider</option>
             </select>
@@ -274,12 +388,23 @@ function CredentialsPanel() {
     setError("");
     try {
       await post(`/admin/model-credentials/${id}/probe`);
-      await credentials.reload();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "探测失败");
     } finally {
+      await credentials.reload();
       setBusy("");
     }
+  }
+  async function resume(id: string) {
+    if (!window.confirm("已在中转站处理余额或额度问题？恢复后下一次请求将重新尝试模型。")) return;
+    setBusy(id);
+    setError("");
+    try {
+      await post(`/admin/model-credentials/${id}/cooldown-reset`);
+      await credentials.reload();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "恢复调度失败");
+    } finally { setBusy(""); }
   }
   return (
     <AdminPanel icon={KeyRound} title="密钥与凭据">
@@ -325,12 +450,13 @@ function CredentialsPanel() {
               <span>
                 {item.providerId} · 尾号 {item.lastFour}
               </span>
+              {item.cooldown ? <small role="status">{item.cooldown.message}</small> : null}
             </div>
-            <Status value={item.status} />
+            <Status value={item.cooldown ? "needs_attention" : item.status} />
             <Button
               variant="secondary"
               size="compact"
-              onClick={() => probe(item.id)}
+              onClick={() => item.cooldown?.errorCode === "QUOTA_EXCEEDED" ? resume(item.id) : probe(item.id)}
               disabled={Boolean(busy)}
             >
               {busy === item.id ? (
@@ -338,7 +464,7 @@ function CredentialsPanel() {
               ) : (
                 <RefreshCw size={14} />
               )}
-              连通性测试
+              {item.cooldown?.errorCode === "QUOTA_EXCEEDED" ? "恢复调度" : "连通性测试"}
             </Button>
           </article>
         ))}
@@ -391,10 +517,10 @@ function DeploymentsPanel() {
     setError("");
     try {
       await post(`/admin/model-deployments/${id}/probe`);
-      await deployments.reload();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "部署探测失败");
     } finally {
+      await deployments.reload();
       setBusy("");
     }
   }
@@ -457,8 +583,9 @@ function DeploymentsPanel() {
                 {item.providerId} / {item.physicalModelId}
               </span>
               <small>{item.capabilities.join(" · ")}</small>
+              {item.cooldown ? <small role="status">{item.cooldown.message}</small> : null}
             </div>
-            <Status value={item.status} />
+            <Status value={item.cooldown ? "needs_attention" : item.status} />
             <Button
               variant="secondary"
               size="compact"
