@@ -10,7 +10,7 @@ from sqlalchemy import select
 from .config import get_settings
 from .comfy_video import ComfyVideoClient, workflow
 from .database import SessionLocal
-from .media import MediaGenerationError, compose_uploaded_shots, render_uploaded_shot, probe_media
+from .media import MediaGenerationError, compose_uploaded_shots, render_uploaded_shot, probe_media, render_soundtrack, prepare_portrait_reference
 from .models import ArtifactRow, GenerationRunRow, ProjectRow
 from .fal_video import FalVideoClient, VideoProviderError, download_video, image_input
 from .secret_store import LocalEncryptedSecretStore
@@ -25,8 +25,11 @@ _executor: ThreadPoolExecutor | None = None
 _in_flight: set[str] = set()
 
 
-def build_plan(project, storyboard, quality="standard", audio_asset_id=None, narration=False, shot_id=None) -> dict:
+def build_plan(project, storyboard, quality="standard", audio_asset_id=None, narration=None, shot_id=None) -> dict:
     shots = deepcopy(storyboard.data.get("shots", []))
+    sound = storyboard.data.get("soundPlan", {}) if shot_id is None else {}
+    narration = sound.get("narration", False) if narration is None else narration
+    soundtrack = sound.get("background") == "local-pulse" and not audio_asset_id
     if not 1 <= len(shots) <= 12:
         raise ValueError("需要 1 至 12 个镜头")
     shot_numbers = {shot.get("id"): index for index, shot in enumerate(shots, 1) if isinstance(shot, dict)}
@@ -53,6 +56,15 @@ def build_plan(project, storyboard, quality="standard", audio_asset_id=None, nar
         if shot.get("fit", "contain") not in {"contain", "cover"}:
             raise ValueError(f"镜头 {index} 构图方式无效")
         strategy = shot.get("sourceStrategy")
+        production = shot.get("productionPlan") or {}
+        if shot.get("requiresPlanning"):
+            raise ValueError(f"镜头 {index} 已修改，请自动准备素材以更新制作计划")
+        if production.get("blocker"):
+            raise ValueError(f"镜头 {index}：{production['blocker']}")
+        if production.get("exactOrbit") and strategy not in {"blender-3d", "user-video"}:
+            raise ValueError(f"镜头 {index} 需要准确模型或真实环绕视频，当前方式不能生成准确完整 360 度")
+        if shot_id is None and production.get("needsPreview") and not shot.get("previewRunId"):
+            raise ValueError(f"镜头 {index} 请先生成试片并采用满意的结果，再制作整片")
         if strategy not in {"image-motion", "user-video", "image-to-video", "blender-3d"}:
             raise ValueError(f"镜头 {index} 的 {strategy or '未知'} 能力尚未接入；需要视频 Provider 或 Blender，未自动替换来源")
         source = assets.get(shot.get("sourceAssetId"))
@@ -84,12 +96,12 @@ def build_plan(project, storyboard, quality="standard", audio_asset_id=None, nar
         video = video_plan(session, video_shots) if video_shots else None
         speech = narration_plan(read_settings(session), shots) if narration else None
         blender = blender_plan(read_settings(session)) if any(s["sourceStrategy"] == "blender-3d" for s in shots) else None
-    return {"shots": shots, "assets": selected_assets, "audio": deepcopy(audio),
+    return {"shots": shots, "assets": selected_assets, "audio": deepcopy(audio), "soundtrack": "local-pulse" if soundtrack else None,
             "scope": "shot-preview" if shot_id is not None else "full-video",
             "narration": speech,
             "blender": blender,
             "video": video, "mode": ("local-ai-video" if video.get("backend") == "comfyui" else "ai-video") if video else "local-blender" if blender else "uploaded-media",
-            "audioMode": ("narration-background-mix" if audio else "local-narration") if speech else ("background-mix" if audio else "source-audio-or-silence"),
+            "audioMode": ("narration-background-mix" if audio or soundtrack else "local-narration") if speech else ("local-soundtrack" if soundtrack else "background-mix" if audio else "source-audio-or-silence"),
             "output": {"width": width, "height": height, "fps": 30}, "quality": quality}
 
 
@@ -282,8 +294,11 @@ def _render_local_video(run_id, attempt_id, request, shot, target):
             raise VideoProviderError("本地节点或模型缺失：" + ", ".join(check["missing"]))
         prompt_id = str(uuid4())
         seed = int(uuid4().hex[:12], 16)
-        image = client.upload(request["assets"][shot["sourceAssetId"]], prompt_id)
-        reference = probe_media(Path(request["assets"][shot["sourceAssetId"]]["uri"]))
+        reference_asset = request["assets"][shot["sourceAssetId"]]
+        if shot.get("referenceFraming") == "portrait-soft":
+            reference_asset = prepare_portrait_reference(reference_asset, config, target.parent / f"{prompt_id}.reference.png")
+        image = client.upload(reference_asset, prompt_id)
+        reference = probe_media(Path(reference_asset["uri"]))
         graph = workflow(config, shot, image, prompt_id, seed, (reference["width"], reference["height"]))
         handle = {"requestId": prompt_id, "baseUrl": config["localUrl"]}
         with generation_lock, SessionLocal() as session:
@@ -292,7 +307,8 @@ def _render_local_video(run_id, attempt_id, request, shot, target):
                 return None
             # A known id is stored before submission, so even an ambiguous POST can be queried.
             _update_shot(run, attempt_id, providerHandle=handle, providerRequestId=prompt_id,
-                         submissionState="submitting", seed=seed, nativeWidth=config["width"], nativeHeight=config["height"])
+                         submissionState="submitting", seed=seed, nativeWidth=config["width"], nativeHeight=config["height"],
+                         preparedReferenceSha256=reference_asset["sha256"], decodeMode=config.get("decodeMode", "full"))
             session.commit()
         try:
             client.submit(graph, prompt_id)
@@ -343,6 +359,8 @@ def _render_local_video(run_id, attempt_id, request, shot, target):
 
 def local_composition_shot(request, shot):
     result = {**shot, "sourceStrategy": "user-video", "sourceStartMs": 0}
+    if shot.get("referenceFraming") == "portrait-soft":
+        return result
     if shot.get("fit", "contain") != "contain":
         return result
     info = probe_media(Path(request["assets"][shot["sourceAssetId"]]["uri"]))
@@ -424,7 +442,10 @@ def _execute(run_id: str) -> None:
             run.status = "composing"
             session.commit()
         target = directory / f"{uuid4()}.mp4"
-        metadata = compose_uploaded_shots(paths, request["shots"], request["output"], target, request.get("audio"), narration)
+        audio = request.get("audio")
+        if request.get("soundtrack") == "local-pulse":
+            audio = render_soundtrack(sum(s["durationMs"] for s in request["shots"]), directory / "soundtrack.wav")
+        metadata = compose_uploaded_shots(paths, request["shots"], request["output"], target, audio, narration)
         with generation_lock, SessionLocal() as session:
             run = session.get(GenerationRunRow, run_id)
             if run.status == "cancelled":

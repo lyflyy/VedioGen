@@ -12,7 +12,7 @@ from .blender import validate_glb, matching_process
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -22,7 +22,7 @@ from .gateway import ModelGatewayError, generate_storyboard
 from .advisor import create_advice
 from .generation import ACTIVE, build_plan, generation_lock, latest_shots, readiness, submit_run, live_blender_run
 from .media import MediaGenerationError
-from .models import AccountBriefRow, AdvisorRunRow, ArtifactRow, DocumentRow, GenerationRunRow, ModelDeploymentRow, ModelProviderRow, ProjectRow, RoutingVersionRow
+from .models import AccountBriefRow, AdvisorRunRow, ArtifactRow, AssetDiscoveryRow, DocumentRow, GenerationRunRow, ModelDeploymentRow, ModelInvocationRow, ModelProviderRow, ProjectRow, RoutingVersionRow
 from .schemas import AccountBriefInput, ApprovalRequest, AssetUploadIntentInput, CreateBriefRequest, CreateProjectRequest, GenerationRequest, MessageRequest, StoryboardUpdate
 from .serializers import account_brief, advisor_run, artifact, document, generation_run, project
 
@@ -58,7 +58,7 @@ def upsert_account_brief(payload: AccountBriefInput, session: Session = Depends(
 
 def get_project_or_404(session: Session, project_id: str) -> ProjectRow:
     row = session.get(ProjectRow, project_id)
-    if not row:
+    if not row or row.status == "deleted":
         raise HTTPException(status_code=404, detail="Project not found")
     return row
 
@@ -75,14 +75,75 @@ def list_projects(
     status: str | None = None,
     query: str | None = None,
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
 ) -> dict:
-    statement = select(ProjectRow).order_by(ProjectRow.updated_at.desc()).limit(page_size)
-    if status:
+    active = or_(
+        select(GenerationRunRow.id).where(GenerationRunRow.project_id == ProjectRow.id, GenerationRunRow.status.in_(ACTIVE)).exists(),
+        select(DocumentRow.id).where(DocumentRow.project_id == ProjectRow.id, DocumentRow.status.in_(["queued", "running"])).exists(),
+        select(ModelInvocationRow.id).where(ModelInvocationRow.project_id == ProjectRow.id, ModelInvocationRow.status == "calling").exists(),
+        select(AssetDiscoveryRow.id).where(AssetDiscoveryRow.project_id == ProjectRow.id, AssetDiscoveryRow.status.in_(["queued", "running"])).exists())
+    statement = select(ProjectRow, active.label("activity_running"))
+    if status != "deleted":
+        statement = statement.where(ProjectRow.status != "deleted")
+    if status == "pending":
+        statement = statement.where(~active, ProjectRow.status.in_(["intake", "advising", "brief_draft", "brief_approved", "storyboard_draft", "storyboard_approved", "needs_attention"]))
+    elif status == "generating":
+        statement = statement.where(or_(active, ProjectRow.status == "generating"))
+    elif status == "completed":
+        statement = statement.where(~active, ProjectRow.status == "completed")
+    elif status:
         statement = statement.where(ProjectRow.status == status)
     if query:
         statement = statement.where(func.lower(ProjectRow.title).contains(query.lower()))
-    return {"items": [project(row) for row in session.scalars(statement)] , "nextCursor": None}
+    total = session.scalar(select(func.count()).select_from(statement.subquery()))
+    rows = session.execute(statement.order_by(ProjectRow.updated_at.desc(), ProjectRow.id).offset(offset).limit(page_size))
+    return {"items": [{**project(row), "activityRunning": running} for row, running in rows], "total": total, "nextCursor": offset + page_size if offset + page_size < total else None}
+
+
+@router.delete("/projects/{project_id}")
+def delete_project(project_id: str, session: Session = Depends(get_session)) -> dict:
+    from .advisor import _lock, _inflight
+    from .storyboard_jobs import lock as script_lock
+    from .asset_discovery import lock as discovery_lock
+    with script_lock, discovery_lock, generation_lock, _lock:
+        row = get_project_or_404(session, project_id)
+        active = project_id in _inflight or session.scalar(select(GenerationRunRow.id).where(GenerationRunRow.project_id == project_id, GenerationRunRow.status.in_(ACTIVE)))
+        active = active or session.scalar(select(DocumentRow.id).where(DocumentRow.project_id == project_id, DocumentRow.status.in_(["queued", "running"])))
+        active = active or session.scalar(select(ModelInvocationRow.id).where(ModelInvocationRow.project_id == project_id, ModelInvocationRow.status == "calling"))
+        active = active or session.scalar(select(AssetDiscoveryRow.id).where(AssetDiscoveryRow.project_id == project_id, AssetDiscoveryRow.status.in_(["queued", "running", "searching"])))
+        if active:
+            raise HTTPException(409, "项目仍有任务执行中，请先等待完成或停止任务后再删除")
+        session.add(DocumentRow(id=str(uuid4()), project_id=project_id, kind="project-deletion", version=1, status="completed",
+            data={"previousStatus": row.status, "deletedAt": timestamp()}))
+        row.status = "deleted"
+        row.row_version += 1
+        session.commit()
+        return {"id": project_id, "status": "deleted"}
+
+
+@router.post("/projects/{project_id}/restoration")
+def restore_project(project_id: str, session: Session = Depends(get_session)) -> dict:
+    with generation_lock:
+        row = session.get(ProjectRow, project_id)
+        if not row or row.status != "deleted":
+            raise HTTPException(404, "回收站项目不存在")
+        record = session.scalar(select(DocumentRow).where(DocumentRow.project_id == project_id, DocumentRow.kind == "project-deletion").order_by(DocumentRow.created_at.desc()))
+        row.status = record.data["previousStatus"] if record else "intake"
+        row.row_version += 1
+        session.commit()
+        return project(row)
+
+
+@router.get("/projects/{project_id}/activity")
+def get_activity(project_id: str, category: str | None = None, offset: int = Query(0, ge=0),
+        page_size: int = Query(50, alias="pageSize", ge=1, le=100), session: Session = Depends(get_session)) -> dict:
+    from .project_activity import activity
+    items = activity(session, get_project_or_404(session, project_id))
+    if category:
+        items = [item for item in items if item["category"] == category]
+    return {"items": items[offset:offset + page_size], "total": len(items),
+        "nextCursor": offset + page_size if offset + page_size < len(items) else None}
 
 
 @router.post("/projects", status_code=201)
@@ -111,6 +172,46 @@ def create_project(payload: CreateProjectRequest, session: Session = Depends(get
     session.add(row)
     session.commit()
     return project(row)
+
+
+@router.post("/projects/{project_id}/copies", status_code=201)
+def copy_project(project_id: str, session: Session = Depends(get_session)) -> dict:
+    with generation_lock:
+        source = get_project_or_404(session, project_id)
+        if not source.current_storyboard_version_id or not source.current_brief_version_id:
+            raise HTTPException(422, "需要已保存的脚本和创意方案才能复用")
+        board = get_document_or_404(session, source.current_storyboard_version_id, "storyboard", source.id)
+        brief = get_document_or_404(session, source.current_brief_version_id, "brief", source.id)
+        pid, sid, bid = str(uuid4()), str(uuid4()), str(uuid4())
+        id_map = {source.id: pid, board.id: sid, brief.id: bid}
+        for item in [*source.asset_versions, *board.data["shots"], *source.messages, *source.facts]:
+            if item.get("id"):
+                id_map[item["id"]] = str(uuid4())
+        def remap(value):
+            if isinstance(value, dict):
+                return {key: remap(item) for key, item in value.items() if key not in {"approvedAt", "previewRunId"}}
+            if isinstance(value, list):
+                return [remap(item) for item in value]
+            return id_map.get(value, value) if isinstance(value, str) else value
+        assets = remap(deepcopy(source.asset_versions))
+        for original, asset in zip(source.asset_versions, assets):
+            asset.update(reusedFromProjectId=source.id, reusedFromAssetId=original["id"])
+        data = remap(deepcopy(board.data))
+        for shot in data["shots"]:
+            if shot.get("sourceStrategy") in {"image-motion", "image-to-video"}:
+                shot.setdefault("backgroundFill", "soft")
+                shot.setdefault("referenceFraming", "portrait-soft")
+        data.update(status="draft", version=1, reusedFromProjectId=source.id, reusedFromStoryboardId=board.id)
+        row = ProjectRow(id=pid, title=(source.title[:110] + " · 副本"), content_pack_id=source.content_pack_id,
+            mode=source.mode, target_platform=source.target_platform, locale=source.locale,
+            messages=remap(deepcopy(source.messages)), facts=remap(deepcopy(source.facts)), asset_versions=assets,
+            status="storyboard_draft", current_storyboard_version_id=sid, current_brief_version_id=bid)
+        session.add(row)
+        session.add(DocumentRow(id=bid, project_id=pid, kind="brief", version=1, status="draft",
+            data={**remap(deepcopy(brief.data)), "status": "draft", "version": 1}))
+        session.add(DocumentRow(id=sid, project_id=pid, kind="storyboard", version=1, status="draft", data=data))
+        session.commit()
+        return project(row)
 
 
 @router.post("/assets/upload-intents", status_code=201)
@@ -352,9 +453,21 @@ def replace_storyboard(project_id: str, storyboard_id: str, payload: StoryboardU
             raise HTTPException(status_code=422, detail="最多 12 个镜头，成片最长 60 秒")
         shots, cursor = [], 0
         for index, shot in enumerate(payload.shots, 1):
+            old = next((s for s in row.data["shots"] if s["id"] == shot["id"]), {})
+            if shot.get("sourceAssetId") != old.get("sourceAssetId"):
+                shot["selectionOwner"] = "user" if shot.get("sourceAssetId") else "platform"
+            if shot.get("sourceStrategy") != old.get("sourceStrategy"):
+                shot["strategyOwner"] = "user"
+            if any(shot.get(key) != old.get(key) for key in ("visual", "camera", "sourceAssetId", "sourceStrategy")):
+                shot.pop("productionPlan", None)
+                shot.pop("previewRunId", None)
+                if old.get("productionPlan") or old.get("requiresPlanning"):
+                    shot["requiresPlanning"] = shot.get("sourceStrategy") in {"image-motion", "image-to-video"}
             shots.append({**shot, "order": index, "startMs": cursor, "status": "draft"})
             cursor += shot["durationMs"]
         row.data = {**row.data, "shots": shots, "totalDurationMs": total, "status": "draft"}
+        if payload.sound_plan is not None:
+            row.data = {**row.data, "soundPlan": payload.sound_plan.model_dump(), "soundPlanConfirmed": True}
         row.status = "draft"
         row.row_version += 1
         project_row.status = "storyboard_draft"

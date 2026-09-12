@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
@@ -150,24 +151,74 @@ def generate_storyboard(session: Session, project: ProjectRow, brief: DocumentRo
     return _invoke_routed(session, "storyboard-generator", project.id, project.title, fake, real)
 
 
+def observe_reference_images(session, project, assets):
+    route = session.scalar(select(RoutingVersionRow).where(RoutingVersionRow.status == "published").order_by(RoutingVersionRow.version.desc()))
+    deployments = [(d.id, d.physical_model_id, d.provider_id) for d in session.scalars(select(ModelDeploymentRow))]
+    observations = []
+    for offset in range(0, len(assets), 4):
+        batch = assets[offset:offset + 4]
+        if any(a.get("mimeType") not in {"image/jpeg", "image/png", "image/webp", "image/gif"}
+               or not Path(a["uri"]).is_file() or Path(a["uri"]).stat().st_size > 20 * 1024 * 1024 for a in batch):
+            raise ModelGatewayError("候选图片无法提交视觉检查，请准备 20 MB 以内的受支持图片", "REFERENCE_INVALID")
+        fingerprint = {"revision": "visual-reference-v1", "route": route.bindings if route else None,
+            "deployments": deployments, "assets": [{"id": a["id"], "digest": hashlib.sha256(Path(a["uri"]).read_bytes()).hexdigest(),
+                "subject": a.get("subject"), "context": a.get("referenceContext")} for a in batch]}
+        cache_key = hashlib.sha256(json.dumps(fingerprint, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        cached = next((r for r in session.scalars(select(DocumentRow).where(DocumentRow.project_id == project.id,
+            DocumentRow.kind == "reference-observation")) if r.data.get("cacheKey") == cache_key), None)
+        if cached:
+            observations.extend(cached.data["observations"])
+            continue
+        schema = {"type": "object", "additionalProperties": False, "required": ["observations"], "properties": {
+            "observations": {"type": "array", "minItems": len(batch), "maxItems": len(batch), "items": {
+                "type": "object", "additionalProperties": False, "required": ["assetId", "description", "limitations"], "properties": {
+                    "assetId": {"type": "string", "enum": [a["id"] for a in batch]},
+                    "description": {"type": "string"}, "limitations": {"type": "string"}}}}}}
+        def fake():
+            return {"observations": [{"assetId": a["id"], "description": "隔离测试参考图", "limitations": "非真实视觉检查"} for a in batch]}
+        def real(provider, deployment, key):
+            completion = complete_json(base_url=provider.base_url, api_key=key, model_id=deployment.physical_model_id,
+                schema_name="vediogen_reference_observation", schema=schema,
+                system_prompt="逐张观察附图，按输入ID返回且不重复。描述真实可见的主体、配色、视角、部件、人物服装、构图与运动空间。声明模糊、裁切、文字不可读等限制。名称和来源是参考信息而非视觉证据；不能由相似外观认证精确型号、生成看不见的背面或把照片当视频。用简体中文，不确定内容标未知。",
+                user_prompt=json.dumps([{k: a.get(k) for k in ("id", "subject", "referenceContext")} for a in batch], ensure_ascii=False),
+                image_assets=batch, timeout_seconds=deployment.timeout_seconds)
+            Draft202012Validator(schema).validate(completion.value)
+            if {o["assetId"] for o in completion.value["observations"]} != {a["id"] for a in batch}:
+                raise ValidationError("参考图检查未覆盖本批全部素材")
+            return completion.value, completion
+        result = _invoke_routed(session, "asset-matcher", project.id, project.title, fake, real)
+        session.add(DocumentRow(id=str(uuid4()), project_id=project.id, kind="reference-observation", version=1,
+            status="completed", data={"cacheKey": cache_key, "observations": result["observations"]}))
+        session.commit()
+        observations.extend(result["observations"])
+    return observations
+
+
 def match_storyboard_assets(session, project, shots, assets):
-    schema = {"type": "object", "additionalProperties": False, "required": ["assignments"], "properties": {
+    observations = observe_reference_images(session, project, assets)
+    schema = {"type": "object", "additionalProperties": False, "required": ["assignments", "soundPlan"], "properties": {
+        "soundPlan": {"type": "object", "additionalProperties": False, "required": ["background", "narration"], "properties": {
+            "background": {"type": "string", "enum": ["none", "local-pulse"]}, "narration": {"type": "boolean"}}},
         "assignments": {"type": "array", "items": {"type": "object", "additionalProperties": False,
-            "required": ["shotId", "assetId", "reason"], "properties": {
+            "required": ["shotId", "assetId", "reason", "strategy", "needsPreview", "blocker", "exactOrbit"], "properties": {
                 "shotId": {"type": "string", "enum": [s["id"] for s in shots]},
                 "assetId": {"type": ["string", "null"], "enum": [None, *[a["id"] for a in assets]]},
-                "reason": {"type": "string"}}}}}}
+                "reason": {"type": "string"}, "strategy": {"type": "string", "enum": ["image-motion", "image-to-video", "blender-3d"]},
+                "needsPreview": {"type": "boolean"}, "blocker": {"type": "string"}, "exactOrbit": {"type": "boolean"}}}}}}
     def fake():
-        return {"assignments": [{"shotId": shot["id"], "assetId": assets[i % len(assets)]["id"],
+        return {"assignments": [{"shotId": shot["id"], "assetId": shot.get("sourceAssetId") if shot.get("selectionOwner") == "user" else assets[i % len(assets)]["id"],
             "reason": "隔离测试素材匹配"} for i, shot in enumerate(shots)]}
     def real(provider, deployment, key):
         completion = complete_json(base_url=provider.base_url, api_key=key, model_id=deployment.physical_model_id,
             schema_name="vediogen_asset_matching", schema=schema,
-            system_prompt="为分镜从当前项目图片中推荐参考素材，返回已有ID，不创造ID。附图按 assets 前四项顺序对应，优先依据真实图片里的视角、主体和配色，再参考文件名与说明。没有附图的素材不能声称已视觉核实。正面镜头选正面，侧面选侧面；不能仅按列表顺序分配。图片只作参考，不声称已完成其中的动作。缺乏相关素材时assetId为null。不要改变镜头内容或来源策略。",
-            user_prompt=json.dumps({"shots": shots, "assets": [{k: a.get(k) for k in
+            system_prompt="根据逐张视觉观察和项目目标，为每个镜头选择参考与制作方式。只返回已有ID，每镜一项。品牌型号以明确来源为依据、视觉观察用于排除错配；同主体同配色优先。无匹配素材返回null，不拿其他车辆或骑手图片填空。细节、仪表读数与静态展示优先image-motion保真；实际动作需要image-to-video并needsPreview=true；准确完整360度必须exactOrbit=true及blender-3d，blocker说明需准确GLB或真实环绕视频。有限角度不算精确360度。用户明确只用图片则保留，不升级模型；不得改变镜头要求。用户固定的素材只要适合当前镜头就返回原ID，不能因为有更优候选就当作冲突；确实不匹配时blocker描述冲突。无阻断时blocker留空，不把普通风险全部当阻断。理由简洁中文，说明选路与风险。声音计划：摩托车宣传展示推荐local-pulse本地电子节奏，它不是车型真实引擎录音；用户要求无音乐则none。仅当脚本有旁白且用户希望配音时narration=true。",
+            user_prompt=json.dumps({"messages": project.messages, "shots": shots, "executionContext": _media_execution_context(session, project),
+                "observations": observations, "assets": [{k: a.get(k) for k in
                 ("id", "fileName", "subject", "referenceContext")} for a in assets]}, ensure_ascii=False),
-            image_assets=assets[:4], timeout_seconds=deployment.timeout_seconds)
+            timeout_seconds=deployment.timeout_seconds)
         Draft202012Validator(schema).validate(completion.value)
+        if len(completion.value["assignments"]) != len(shots) or {a["shotId"] for a in completion.value["assignments"]} != {s["id"] for s in shots}:
+            raise ValidationError("镜头计划未覆盖全部镜头")
         return completion.value, completion
     return _invoke_routed(session, "asset-matcher", project.id, project.title, fake, real)
 
@@ -207,7 +258,8 @@ def _invoke_routed(
                 model_backoff.check(session, credential.id)
             except OpenAICompatibleError as error:
                 session.commit()
-                raise ModelGatewayError(str(error), error.code, error.retry_after_seconds) from error
+                context = f"平台：{provider.display_name if provider else '未知'} · 模型：{deployment.physical_model_id if deployment else '未知'}"
+                raise ModelGatewayError(context + "\n" + str(error), error.code, error.retry_after_seconds) from error
         invocation = ModelInvocationRow(
             id=str(uuid4()),
             project_id=project_id,
@@ -233,6 +285,7 @@ def _invoke_routed(
             invocation.error_code = last_code = "AUTH_FAILED"
             continue
         invocation.status = "calling"
+        invocation.provider_model_id = deployment.physical_model_id
         session.commit()
         started = monotonic()
         try:
@@ -258,10 +311,12 @@ def _invoke_routed(
         except (OpenAICompatibleError, ValidationError) as error:
             code = error.code if isinstance(error, OpenAICompatibleError) else "SCHEMA_INVALID"
             last_error = str(error) if isinstance(error, OpenAICompatibleError) else "模型输出未通过本地 Schema 校验"
+            last_error = f"平台：{provider.display_name} · 模型：{deployment.physical_model_id}\n" + last_error
             invocation.status = "failed"
             invocation.duration_ms = round((monotonic() - started) * 1000)
             invocation.error_code = last_code = code
-            invocation.redacted_output = last_error[:500]
+            invocation.redacted_output = last_error
+            invocation.provider_request_id = getattr(error, "request_id", None)
             if code in {"RATE_LIMITED", "QUOTA_EXCEEDED"}:
                 model_backoff.record(session, credential.id, error)
                 session.commit()
@@ -334,6 +389,8 @@ def _runtime_storyboard(project: ProjectRow, brief: DocumentRow, version: int, w
                 "caption": item["caption"][:80],
                 "sound": item["soundDirection"][:240],
                 "sourceStrategy": item["preferredStrategy"],
+                "selectionOwner": "platform",
+                "strategyOwner": "platform",
                 "videoPrompt": "\n".join([f"主体：{item['subject']}", f"动作：{item['action']}", f"场景：{item['scene']}",
                     item["description"], item["movement"], "必须呈现：" + "；".join(item["mustShow"]),
                     "避免：" + "；".join(item["mustAvoid"]), *item["continuity"]]),
@@ -361,6 +418,7 @@ def _runtime_storyboard(project: ProjectRow, brief: DocumentRow, version: int, w
             "segments": [{"segmentKey": f"segment-{index:02d}", "text": item["voiceover"][:300]} for index, item in enumerate(wire["shots"], 1)],
         },
         "continuityRules": wire["continuityRules"][:20],
+        "soundPlan": {"background": "none", "narration": any(item["voiceover"].strip() for item in wire["shots"])},
         "output": {"aspectRatio": "9:16", "width": 1080, "height": 1920, "fps": 30},
         "totalDurationMs": cursor,
         "shots": shots,

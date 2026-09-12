@@ -1,6 +1,7 @@
 import base64
 import json
 import math
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -16,6 +17,18 @@ class OpenAICompatibleError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.retry_after_seconds = retry_after_seconds
+        self.request_id = None
+
+
+def safe_error_text(value: object, secrets: tuple[str, ...] = ()) -> str:
+    text = str(value)
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    text = re.sub(r"(?i)bearer\s+[^\s\"'<>]+|sk-[a-zA-Z0-9_-]+", "[REDACTED]", text)
+    text = re.sub(r"(?i)(api[_-]?key|authorization|access[_-]?token|password|secret)([\s\"']*[:=][\s\"']*)[^\s,;\"'<>]+", r"\1\2[REDACTED]", text)
+    text = re.sub(r"https?://[^\s<>\"]+", lambda m: m[0].split("?", 1)[0].split("#", 1)[0] if "@" not in m[0] else "[REDACTED URL]", text)
+    return "".join(c for c in text if c in "\n\t" or ord(c) >= 32)[:1200]
 
 
 @dataclass(frozen=True)
@@ -146,6 +159,42 @@ def _headers(api_key: str) -> dict[str, str]:
 def _raise_for_status(response: httpx.Response) -> None:
     if response.is_success:
         return
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    upstream = payload.get("error", payload) if isinstance(payload, dict) else None
+    secrets = []
+    try:
+        authorization = response.request.headers.get("authorization", "")
+        secrets.extend([authorization, authorization.removeprefix("Bearer ")])
+        request_body = json.loads(response.request.content or b"{}")
+        for message in request_body.get("messages", []):
+            content = message.get("content")
+            if isinstance(content, str):
+                secrets.append(content)
+            elif isinstance(content, list):
+                secrets.extend(item["text"] for item in content if isinstance(item, dict) and isinstance(item.get("text"), str))
+    except (RuntimeError, ValueError, AttributeError, TypeError):
+        pass
+    details = []
+    if isinstance(upstream, dict):
+        for key in ("message", "type", "code"):
+            if isinstance(upstream.get(key), (str, int)):
+                details.append(f"{key}: {safe_error_text(upstream[key], tuple(secrets))}")
+    elif isinstance(upstream, str):
+        details.append(safe_error_text(upstream, tuple(secrets)))
+    elif "text/plain" in response.headers.get("content-type", ""):
+        details.append(safe_error_text(response.text, tuple(secrets)))
+    request_id = response.headers.get("x-request-id") or response.headers.get("request-id")
+    request_id = safe_error_text(request_id, tuple(secrets))[:200] if request_id else None
+    def failure(message, code, seconds=None):
+        suffix = "\n上游返回（已脱敏）：\n" + "\n".join(details) if details else "\n上游未提供可展示的错误说明。"
+        if request_id:
+            suffix += f"\n请求 ID：{request_id}"
+        error = OpenAICompatibleError(message + suffix, code, seconds)
+        error.request_id = request_id
+        return error
     if response.status_code == 429:
         try:
             error = response.json().get("error", {})
@@ -155,12 +204,12 @@ def _raise_for_status(response: httpx.Response) -> None:
         except (ValueError, AttributeError):
             exhausted = False
         if exhausted:
-            raise OpenAICompatibleError("模型平台返回 HTTP 429：额度或余额不足，已暂停此凭据；请检查中转站额度并在管理后台更新凭据后重试", "QUOTA_EXCEEDED")
+            raise failure("模型平台返回 HTTP 429：额度或余额不足，已暂停此凭据；请检查中转站额度并在管理后台更新凭据后重试", "QUOTA_EXCEEDED")
         seconds = _retry_after(response.headers.get("retry-after"))
-        raise OpenAICompatibleError(f"模型平台返回 HTTP 429：请求受限，已暂停此凭据 {seconds} 秒；稍后手动重试", "RATE_LIMITED", seconds)
+        raise failure(f"模型平台返回 HTTP 429：请求受限，已暂停此凭据 {seconds} 秒；稍后手动重试", "RATE_LIMITED", seconds)
     code = "AUTH_FAILED" if response.status_code in {401, 403} else "PROVIDER_UNAVAILABLE"
     # Providers may echo Authorization or private request text in their errors.
-    raise OpenAICompatibleError(f"模型平台返回 HTTP {response.status_code}", code)
+    raise failure(f"模型平台返回 HTTP {response.status_code}", code)
 
 
 def _retry_after(value: str | None) -> int:

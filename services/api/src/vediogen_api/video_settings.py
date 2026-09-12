@@ -23,6 +23,7 @@ class VideoSettingsInput(ApiModel):
     width: int = Field(default=832, ge=256, le=832, multiple_of=32)
     height: int = Field(default=480, ge=256, le=832, multiple_of=32)
     steps: int = Field(default=20, ge=4, le=30)
+    decode_mode: Literal["full", "tiled"] = "tiled"
     timeout_seconds: int = Field(default=3600, ge=300, le=7200)
     deployment_id: str | None = None
     estimated_usd_per_second: Decimal = Field(default=Decimal("0"), ge=0, le=100, decimal_places=4)

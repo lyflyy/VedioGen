@@ -29,6 +29,7 @@ import { useParams, useRouter } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import { ProjectHeader } from "@/components/project-header";
+import { ProjectActivity } from "@/components/project-activity";
 import { ReferencePreparation } from "@/components/reference-preparation";
 import { ImageCropDialog } from "@/components/image-crop-dialog";
 import { ShotPreview } from "@/components/shot-preview";
@@ -50,6 +51,8 @@ import type {
 } from "@/lib/types";
 
 type MaterialRun = {
+  previewGenerationRunId?: string;
+  previewShotId?: string;
   resultVersion?: number;
   id: string; status: string; phase: string; errorMessage: string | null;
   storyboardVersionId: string; generationRunId: string | null;
@@ -59,6 +62,7 @@ type MaterialRun = {
 const materialPhases: Record<string, string> = {
   queued: "素材准备排队中", "preparing-assets": "正在检查素材、匹配参考图与生成方式",
   "checking-shots": "正在检查所有镜头", "starting-video": "正在启动视频生成",
+  "reviewing-preview": "关键镜头已安排试片，请查看并采用满意的结果",
 };
 const sourceLabels: Record<string, string> = {
   "image-motion": "图片运镜", "image-to-video": "AI 动态视频", "user-video": "视频剪辑", "blender-3d": "三维渲染",
@@ -86,7 +90,7 @@ export function ProjectWorkspace() {
   const [savedShots, setSavedShots] = useState("");
   const [materials, setMaterials] = useState<MaterialRun | null>(null);
   const materialsActive = Boolean(materials && ["queued", "running"].includes(materials.status));
-  const unsaved = Boolean(storyboard && JSON.stringify(storyboard.shots) !== savedShots);
+  const unsaved = Boolean(storyboard && JSON.stringify([storyboard.shots, storyboard.soundPlan]) !== savedShots);
   const preparing = Boolean(preparation && ["queued", "running"].includes(preparation.status));
   const advisorStarted = useRef(false);
   const generationActive = Boolean(generation && ["queued", "running", "composing"].includes(generation.status));
@@ -120,9 +124,9 @@ export function ProjectWorkspace() {
     setAdvisor(nextAdvisor);
     setBrief(nextBrief);
     setStoryboard(nextStoryboard);
-    setSavedShots(nextStoryboard ? JSON.stringify(nextStoryboard.shots) : "");
+    setSavedShots(nextStoryboard ? JSON.stringify([nextStoryboard.shots, nextStoryboard.soundPlan]) : "");
     setGeneration(nextGeneration);
-    setNarration(Boolean(nextGeneration?.audioMode.includes("narration")));
+    setNarration(nextStoryboard?.soundPlan?.narration ?? Boolean(nextGeneration?.audioMode.includes("narration")));
     if (nextStoryboard?.shots.length)
       setSelectedShot((current) => current ?? nextStoryboard.shots[0].id);
     if (nextGeneration?.finalArtifactId)
@@ -159,6 +163,7 @@ export function ProjectWorkspace() {
           await hydrate();
           if (!cancelled) {
             setMaterials(run);
+            if (run.previewShotId) setSelectedShot(run.previewShotId);
             if (run.generationRunId) router.push(`/projects/${projectId}/generation`);
           }
           return;
@@ -248,7 +253,7 @@ export function ProjectWorkspace() {
       setWorkspace(await api<Workspace>(`/projects/${projectId}/workspace`));
       if (shotId && asset.kind !== "audio") {
         setStoryboard((current) => current ? { ...current, status: "draft", shots: current.shots.map((shot) => shot.id === shotId
-          ? { ...shot, sourceAssetId: asset.id, ...(asset.kind === "video" ? { sourceStrategy: "user-video", sourceStartMs: 0 }
+          ? { ...shot, sourceAssetId: asset.id, selectionOwner: "user", ...(asset.kind === "video" ? { sourceStrategy: "user-video", sourceStartMs: 0 }
             : asset.kind === "model" ? { sourceStrategy: "blender-3d", blenderTemplate: "orbit-360" as const }
             : { sourceStrategy: shot.sourceStrategy === "image-motion" ? "image-motion" : "image-to-video",
                 videoPrompt: shot.videoPrompt || [shot.visual, shot.camera, shot.purpose].filter(Boolean).join("\n"), sourceStartMs: 0 }) } : shot) } : current);
@@ -383,10 +388,11 @@ export function ProjectWorkspace() {
             order: index + 1,
           })),
           totalDurationMs: total,
+          soundPlan: storyboard.soundPlan ?? null,
         },
       );
       setStoryboard(next);
-      setSavedShots(JSON.stringify(next.shots));
+      setSavedShots(JSON.stringify([next.shots, next.soundPlan]));
       setNotice("分镜已保存");
       return next;
     } catch (reason) {
@@ -473,6 +479,7 @@ export function ProjectWorkspace() {
   return (
     <div className="project-page">
       <ProjectHeader project={workspace.project} activeStage={stage} unsaved={unsaved} />
+      {stage === "logs" ? <ProjectActivity projectId={projectId} /> : null}
       {notice ? <div className="workspace-notice" role="status"><Check size={16} />{notice}</div> : null}
       {stage === "storyboard" && storyboard?.materialWarnings?.length ? <div className="workspace-material-warnings">
         {storyboard.materialWarnings.map((warning) => <p key={warning}><AlertCircle size={15} />{warning}</p>)}
@@ -480,7 +487,8 @@ export function ProjectWorkspace() {
       {error ? (
         <div className="workspace-error" role="alert">
           <AlertCircle size={18} />
-          <span>{error}</span>
+          <span className="model-error-text">{error}</span>
+          <Link href={`/projects/${projectId}/logs`}>查看执行日志</Link>
           <button
             onClick={() => {
               if (stage !== "strategy" || advisor) setError("");
@@ -526,7 +534,7 @@ export function ProjectWorkspace() {
           projectId={projectId}
           applyCrop={(shotId, asset) => {
             setWorkspace((current) => current ? { ...current, assetVersions: [...current.assetVersions, asset] } : current);
-            setStoryboard((current) => current ? { ...current, status: "draft", shots: current.shots.map((shot) => shot.id === shotId ? { ...shot, sourceAssetId: asset.id, fit: "contain" } : shot) } : current);
+            setStoryboard((current) => current ? { ...current, status: "draft", shots: current.shots.map((shot) => shot.id === shotId ? { ...shot, sourceAssetId: asset.id, selectionOwner: "user", fit: "contain" } : shot) } : current);
           }}
         />
       ) : null}
@@ -941,14 +949,35 @@ function StoryboardView({
   const currentStoryboard = storyboard;
   const currentShot = selected;
   const selectedAsset = assets.find((asset) => asset.id === selected.sourceAssetId);
+  function exportScript() {
+    const lines = ["# 视频制作脚本", "", `时长：${currentStoryboard.shots.reduce((sum, shot) => sum + shot.durationMs, 0) / 1000} 秒`,
+      `配乐：${currentStoryboard.soundPlan?.background === "local-pulse" ? "本地电子节奏" : "无"}`, ""];
+    currentStoryboard.shots.forEach((shot, index) => {
+      lines.push(`## 镜头 ${index + 1}：${shot.purpose}`, "", `时长：${shot.durationMs / 1000} 秒`,
+        `制作方式：${sourceLabels[shot.sourceStrategy] ?? shot.sourceStrategy}`, `画面意图：${shot.visual}`,
+        `运镜意图：${shot.camera}`,
+        ...(shot.sourceStrategy === "image-motion" ? ["实际执行：原图居中缓慢推近，不生成新视角，不执行真实横移、环绕或主体动作。"] : []),
+        `字幕：${shot.caption}`, `旁白：${currentStoryboard.soundPlan?.narration ? shot.voiceover || "无" : "关闭"}`,
+        `素材：${assets.find(asset => asset.id === shot.sourceAssetId)?.fileName ?? "待准备"}`,
+        `素材 ID：${shot.sourceAssetId || "待准备"}`, "");
+    });
+    const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" }));
+    const link = document.createElement("a"); link.href = url; link.download = `script-${currentStoryboard.id}.md`;
+    link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
   function updateSelected(field: keyof Shot, value: string | number) {
     setStoryboard({
       ...currentStoryboard,
       status: "draft",
       shots: currentStoryboard.shots.map((shot) =>
-        shot.id === currentShot.id ? { ...shot, [field]: value, ...(field === "sourceStrategy" ? {
-          sourceAssetId: "",
-          ...(value === "image-to-video" ? { videoPrompt: shot.videoPrompt || [shot.visual, shot.camera, ...(shot.continuity ?? [])].join("\n") } : {}),
+        shot.id === currentShot.id ? { ...shot, [field]: value,
+          ...(["sourceStrategy", "sourceAssetId", "visual", "camera"].includes(field) ? { productionPlan: undefined } : {}),
+          ...(field === "sourceAssetId" ? { selectionOwner: value ? "user" as const : "platform" as const } : {}),
+          ...(field === "sourceStrategy" ? {
+          strategyOwner: "user" as const,
+          sourceAssetId: assets.find((asset) => asset.id === shot.sourceAssetId)?.kind ===
+            (value === "blender-3d" ? "model" : value === "user-video" ? "video" : "image") ? shot.sourceAssetId : "",
+          ...(value === "image-to-video" ? { referenceFraming: "portrait-soft", backgroundFill: "soft", videoPrompt: shot.videoPrompt || [shot.visual, shot.camera, ...(shot.continuity ?? [])].join("\n") } : {}),
         } : {}) } : shot,
       ),
     });
@@ -1040,6 +1069,7 @@ function StoryboardView({
                 <ArrowDown size={17} />
               </button>
             </Tooltip>
+            <Tooltip label="导出当前脚本"><button className="icon-button inverse" aria-label="导出当前脚本" onClick={exportScript}><Download size={17} /></button></Tooltip>
           </div>
         </div>
         <div className="vertical-stage">
@@ -1058,7 +1088,13 @@ function StoryboardView({
           <strong>{selected.purpose}</strong>
           <span>{selected.visual}</span>
         </div>
-        <ShotPreview key={`${storyboard.id}-${selected.id}`} projectId={projectId} storyboardId={storyboard.id} shotId={selected.id}
+        {selected.productionPlan ? <section className="production-summary" aria-label="镜头制作计划">
+          <strong>{sourceLabels[selected.sourceStrategy]}{selected.productionPlan.needsPreview && !selected.previewRunId ? " · 先试片" : ""}</strong>
+          <p>{selected.productionPlan.reason}</p>
+          {selected.productionPlan.blocker ? <p role="alert">{selected.productionPlan.blocker}</p> : null}
+          {selected.selectionOwner === "user" ? <Button variant="secondary" size="compact" disabled={locked || Boolean(busy)} onClick={() => updateSelected("sourceAssetId", "")}>交由平台重新选择</Button> : null}
+        </section> : null}
+        <ShotPreview key={`${storyboard.id}-${selected.id}-${materials?.previewGenerationRunId ?? ""}`} projectId={projectId} storyboardId={storyboard.id} shotId={selected.id}
           disabled={previewDisabled || Boolean(busy)} save={() => save(storyboard.shots)}
           onActiveChange={onPreviewActive} onAdopted={onPreviewAdopted} />
       </main>
@@ -1070,6 +1106,12 @@ function StoryboardView({
           </div>
         </div>
         <fieldset className="media-fields" disabled={locked || Boolean(busy)}>
+        <div className="sound-plan">
+          <label>整片配乐<select aria-label="整片配乐" value={storyboard.soundPlan?.background ?? "none"} onChange={(event) => setStoryboard({ ...currentStoryboard, status: "draft", soundPlan: { narration: storyboard.soundPlan?.narration ?? false, background: event.target.value as "none" | "local-pulse" } })}>
+            <option value="none">无配乐</option><option value="local-pulse">本地电子节奏</option>
+          </select></label>
+          <label className="narration-option"><input type="checkbox" checked={storyboard.soundPlan?.narration ?? false} onChange={(event) => setStoryboard({ ...currentStoryboard, status: "draft", soundPlan: { background: storyboard.soundPlan?.background ?? "none", narration: event.target.checked } })} />整片使用中文旁白</label>
+        </div>
         <label>
           镜头目的
           <input
@@ -1140,7 +1182,7 @@ function StoryboardView({
         {selected.sourceStrategy === "user-video" ? <label>素材入点（毫秒）<input type="number" min="0" step="100" value={selected.sourceStartMs ?? 0} onChange={(event) => updateSelected("sourceStartMs", Number(event.target.value))} /></label> : null}
         <label>构图<select aria-label="构图" value={selected.fit ?? "contain"} onChange={(event) => updateSelected("fit", event.target.value)}><option value="contain">完整画面</option><option value="cover">居中裁切</option></select></label>
         {selectedAsset?.kind === "image" ? <ImageCropDialog key={`${selected.id}-${selectedAsset.id}`} projectId={projectId} asset={selectedAsset} disabled={locked || Boolean(busy)} onApply={(asset) => applyCrop(selected.id, asset)} /> : null}
-        <Button variant="secondary" size="compact" disabled={!selectedAsset} onClick={() => setStoryboard({ ...currentStoryboard, status: "draft", shots: currentStoryboard.shots.map((shot) => shot.sourceStrategy === selected.sourceStrategy ? { ...shot, sourceAssetId: selected.sourceAssetId } : shot) })}>应用到同类镜头</Button>
+        <Button variant="secondary" size="compact" disabled={!selectedAsset} onClick={() => setStoryboard({ ...currentStoryboard, status: "draft", shots: currentStoryboard.shots.map((shot) => shot.sourceStrategy === selected.sourceStrategy ? { ...shot, sourceAssetId: selected.sourceAssetId, selectionOwner: "user" } : shot) })}>应用到同类镜头</Button>
         </details>
         <label className="upload-button media-upload"><Paperclip size={16} />添加素材<input type="file" accept="image/*,video/*,audio/*,.glb" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, selected.id); event.target.value = ""; }} /></label>
         <label>
@@ -1353,7 +1395,7 @@ function FinalView({
       <aside className="final-details">
         <span className="section-kicker">生成完成</span>
         <h1>成片已生成</h1>
-          <p>{generation.audioMode === "narration-background-mix" ? "本地中文旁白、背景音频与素材原声混合" : generation.audioMode === "local-narration" ? "本地中文旁白与素材原声混合" : generation.audioMode === "background-mix" ? "背景音频与素材原声混合" : "保留素材原声；无原声片段静音"}</p>
+          <p>{generation.audioMode === "narration-background-mix" ? "本地中文旁白、背景音频与素材原声混合" : generation.audioMode === "local-narration" ? "本地中文旁白与素材原声混合" : generation.audioMode === "local-soundtrack" ? "本地电子节奏与素材原声混合" : generation.audioMode === "background-mix" ? "背景音频与素材原声混合" : "保留素材原声；无原声片段静音"}</p>
         <dl>
           <div>
             <dt>尺寸</dt>

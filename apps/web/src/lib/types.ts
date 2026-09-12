@@ -7,9 +7,11 @@ export type ProjectStatus =
   | "storyboard_approved"
   | "generating"
   | "needs_attention"
-  | "completed";
+  | "completed"
+  | "deleted";
 
 export interface Project {
+  activityRunning?: boolean;
   id: string;
   title: string;
   contentPackId: string;
@@ -106,6 +108,10 @@ export interface Shot {
   sourceStrategy: string;
   blenderTemplate?: "orbit-360" | "";
   sourceAssetId?: string;
+  selectionOwner?: "platform" | "user";
+  strategyOwner?: "platform" | "user";
+  previewRunId?: string;
+  productionPlan?: { reason: string; blocker: string; needsPreview: boolean; exactOrbit: boolean; referenceChecked: boolean; strategy: string };
   sourceStartMs?: number;
   videoPrompt?: string;
   continuity?: string[];
@@ -114,6 +120,7 @@ export interface Shot {
 }
 
 export interface Storyboard {
+  soundPlan?: { background: "none" | "local-pulse"; narration: boolean };
   rowVersion?: number;
   materialWarnings?: string[];
   id: string;

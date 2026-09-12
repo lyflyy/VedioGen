@@ -1,0 +1,64 @@
+import { expect, test } from '@playwright/test';
+import { expectNoHorizontalOverflow, expectNoSeriousA11yIssues } from './helpers';
+
+test('project filters, delete confirmation, recycle bin and restoration work with the API', async ({ page }, testInfo) => {
+  const title = `管理验收-${Date.now()}`;
+  const project = await (await page.request.post('/api/v1/projects', { data: { title, initialMessage: '摩托车展示' } })).json();
+  await page.goto('/projects');
+  await page.getByLabel('搜索项目').fill(title);
+  const card = page.locator('.project-card').filter({ hasText: title });
+  await expect(card).toBeVisible();
+  const filters = page.getByRole('group', { name: '项目状态' });
+  await filters.getByRole('button', { name: '待确认', exact: true }).click();
+  await expect(card).toBeVisible();
+  await filters.getByRole('button', { name: '生成中', exact: true }).click();
+  await expect(page.getByText('没有符合条件的项目')).toBeVisible();
+  await filters.getByRole('button', { name: '已完成', exact: true }).click();
+  await expect(page.getByText('没有符合条件的项目')).toBeVisible();
+  await filters.getByRole('button', { name: '全部', exact: true }).click();
+  await expect(card).toBeVisible();
+  page.once('dialog', dialog => dialog.dismiss());
+  await card.getByRole('button', { name: `删除项目：${title}`, exact: true }).click();
+  await expect(card).toBeVisible();
+  page.once('dialog', dialog => dialog.accept());
+  await card.getByRole('button', { name: `删除项目：${title}`, exact: true }).click();
+  await expect(card).toHaveCount(0);
+  await filters.getByRole('button', { name: '回收站', exact: true }).click();
+  await expect(card).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('recycle-desktop.png'), fullPage: true });
+  await card.getByRole('button', { name: `恢复项目：${title}`, exact: true }).click();
+  await expect(card).toHaveCount(0);
+  await filters.getByRole('button', { name: '全部', exact: true }).click();
+  await expect(card).toBeVisible();
+  await expectNoSeriousA11yIssues(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: testInfo.outputPath('projects-mobile.png'), fullPage: true });
+  await card.getByRole('link', { name: '执行日志', exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`${project.id}/logs$`));
+  await expect(page.getByText('暂无执行记录')).toBeVisible();
+});
+
+test('project activity shows actual model records and safely renders upstream error details', async ({ page }, testInfo) => {
+  const project = await (await page.request.post('/api/v1/projects', { data: { title: '日志验收', initialMessage: '摩托车展示' } })).json();
+  await page.request.post(`/api/v1/projects/${project.id}/advisor-runs`);
+  await page.goto(`/projects/${project.id}/logs`);
+  await expect(page.locator('.activity-list')).toContainText('创意建议');
+  await page.route(`**/projects/${project.id}/activity?**`, async route => {
+    const response = await route.fetch();
+    const data = await response.json();
+    data.items.unshift({ id: 'isolated-error-fixture', at: new Date().toISOString(), category: 'model', title: 'storyboard-generator', status: 'failed', provider: '隔离测试中转站', model: 'gpt-error-fixture', requestId: 'request-429-e2e', errorCode: 'RATE_LIMITED', detail: 'HTTP 429\n上游返回（已脱敏）：\nmessage: Request rate exceeded <script>not executable</script>\ntype: rate_limit_error' });
+    data.total += 1;
+    await route.fulfill({ response, json: data });
+  });
+  await page.getByRole('button', { name: '刷新日志', exact: true }).click();
+  await expect(page.locator('.activity-list')).toContainText('gpt-error-fixture');
+  await expect(page.locator('.activity-list')).toContainText('Request rate exceeded <script>not executable</script>');
+  await page.locator('.activity-list li').first().getByText('执行详情', { exact: true }).click();
+  await expect(page.locator('.activity-list')).toContainText('request-429-e2e');
+  await expectNoSeriousA11yIssues(page);
+  await page.screenshot({ path: testInfo.outputPath('activity-desktop.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: testInfo.outputPath('activity-mobile.png'), fullPage: true });
+});

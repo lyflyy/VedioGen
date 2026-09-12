@@ -5,7 +5,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
 
 
 class MediaGenerationError(RuntimeError):
@@ -60,6 +60,25 @@ def media_metadata(target: Path, expected_duration_ms: int) -> dict:
     return value
 
 
+def prepare_portrait_reference(asset: dict, output: dict, target: Path) -> dict:
+    source = Path(asset["uri"])
+    if not source.is_file() or "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest() != asset["sha256"]:
+        raise MediaGenerationError("参考图片丢失或内容已改变")
+    size = (output["width"], output["height"])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(source) as original:
+        rgba = ImageOps.exif_transpose(original).convert("RGBA")
+        opaque = Image.new("RGBA", rgba.size, (24, 26, 28, 255))
+        picture = Image.alpha_composite(opaque, rgba).convert("RGB")
+        background = (Image.new("RGB", size, (24, 26, 28)) if rgba.getextrema()[3][0] < 255
+            else ImageOps.fit(picture, size, method=Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(24)))
+        foreground = ImageOps.contain(picture, size, method=Image.Resampling.LANCZOS)
+        background.paste(foreground, ((size[0] - foreground.width) // 2, (size[1] - foreground.height) // 2))
+        background.save(target, "PNG")
+    return {**asset, "uri": str(target.resolve()), "mimeType": "image/png", "width": size[0], "height": size[1],
+        "sha256": "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest()}
+
+
 def render_uploaded_shot(asset: dict, shot: dict, output: dict, target: Path) -> dict:
     source = Path(asset["uri"])
     if not source.is_file() or "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest() != asset["sha256"]:
@@ -109,12 +128,14 @@ def render_uploaded_shot(asset: dict, shot: dict, output: dict, target: Path) ->
         frames = max(1, round(seconds * fps))
         filters += f",zoompan=z='1+0.06*on/{frames}':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d=1:s={width}x{height}:fps={fps}"
     filters = prefix + filters + f",fps={fps},setpts=PTS-STARTPTS"
-    if shot.get("backgroundFill") == "soft" and not image:
+    if shot.get("backgroundFill") == "soft" and flattened is None:
         # Preserve the entire subject; the extended backdrop is not a second sharp image.
         filters = (f"[0:v]{prefix}split[fg][bg];"
             f"[bg]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},boxblur=30:2,eq=brightness=-0.12[back];"
             f"[fg]scale={width}:{height}:force_original_aspect_ratio=decrease[front];"
-            f"[back][front]overlay=(W-w)/2:(H-h)/2,setsar=1,fps={fps},setpts=PTS-STARTPTS[out]")
+            f"[back][front]overlay=(W-w)/2:(H-h)/2,setsar=1"
+            + (f",zoompan=z='1+0.04*on/{max(1, round(seconds * fps))}':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d=1:s={width}x{height}:fps={fps}" if image else "")
+            + f",fps={fps},setpts=PTS-STARTPTS[out]")
         args += ["-filter_complex_threads", "1", "-filter_complex", filters, "-map", "[out]"]
     else:
         args += ["-map", "0:v:0", "-vf", filters]
@@ -133,6 +154,23 @@ def render_uploaded_shot(asset: dict, shot: dict, output: dict, target: Path) ->
 def _ass_time(milliseconds: int) -> str:
     centiseconds = milliseconds // 10
     return f"{centiseconds // 360000}:{centiseconds // 6000 % 60:02}:{centiseconds // 100 % 60:02}.{centiseconds % 100:02}"
+
+
+def render_soundtrack(duration_ms: int, target: Path) -> dict:
+    """A local electronic rhythm bed, not a recording of a particular vehicle."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    seconds = duration_ms / 1000
+    # 120 BPM: decaying kick, offbeat bass and a quiet sustained minor chord.
+    expression = ("0.42*sin(2*PI*(52*t-2.5*exp(-35*mod(t,0.5))))*exp(-18*mod(t,0.5))"
+        "+0.12*sin(2*PI*65.406*t)*exp(-9*mod(t+0.25,0.5))"
+        "+0.035*(sin(2*PI*130.813*t)+sin(2*PI*155.563*t)+sin(2*PI*195.998*t))"
+        "+0.025*sin(2*PI*6100*t)*sin(2*PI*4313*t)*exp(-65*mod(t,0.25))")
+    _encode(["-f", "lavfi", "-i", f"aevalsrc='{expression}':s=48000:d={seconds}",
+        "-af", f"afade=t=in:d=0.12,afade=t=out:st={max(0, seconds - .7)}:d=0.7,loudnorm=I=-18:TP=-2:LRA=7",
+        "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(target.resolve())], target.parent)
+    if not probe_media(target)["hasAudio"]:
+        raise MediaGenerationError("本地节奏音轨生成失败")
+    return {"uri": str(target.resolve()), "sha256": "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest()}
 
 
 def compose_uploaded_shots(paths: list[Path], shots: list[dict], output: dict, target: Path, audio: dict | None = None, narration: Path | None = None) -> dict:
@@ -165,7 +203,7 @@ def compose_uploaded_shots(paths: list[Path], shots: list[dict], output: dict, t
         if not probe_media(audio_path)["hasAudio"]:
             raise MediaGenerationError("所选背景文件没有音轨")
         args += ["-stream_loop", "-1", "-protocol_whitelist", "file,pipe", "-i", str(audio_path.resolve())]
-        filters.append(f"[1:a]volume={0.12 if narration else 0.25}[bg]")
+        filters.append(f"[1:a]volume={0.22 if narration else 0.7},afade=t=out:st={max(0, cursor / 1000 - .5)}:d=0.5[bg]")
         tracks.append("[bg]")
     if narration:
         args += ["-protocol_whitelist", "file,pipe", "-i", str(narration.resolve())]

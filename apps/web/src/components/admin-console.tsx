@@ -144,6 +144,7 @@ type VideoSettings = {
   width: number;
   height: number;
   steps: number;
+  decodeMode: "full" | "tiled";
   timeoutSeconds: number;
   deploymentId: string | null;
   estimatedUsdPerSecond: string;
@@ -194,6 +195,7 @@ function VideoSettingsPanel() {
         localUrl: form.get("localUrl") ?? settings.data?.localUrl,
         width: Number(form.get("width") ?? settings.data?.width), height: Number(form.get("height") ?? settings.data?.height),
         steps: Number(form.get("steps") ?? settings.data?.steps), timeoutSeconds: Number(form.get("timeoutSeconds") ?? settings.data?.timeoutSeconds),
+        decodeMode: form.get("decodeMode") ?? settings.data?.decodeMode ?? "tiled",
         estimatedUsdPerSecond: form.get("price") ?? settings.data?.estimatedUsdPerSecond,
         maxRunUsd: form.get("budget") ?? settings.data?.maxRunUsd,
         narrationEnabled: form.get("narrationEnabled") === "on",
@@ -219,6 +221,7 @@ function VideoSettingsPanel() {
         <label>原生宽度<input name="width" type="number" min="256" max="832" step="32" required defaultValue={settings.data.width} /></label>
         <label>原生高度<input name="height" type="number" min="256" max="832" step="32" required defaultValue={settings.data.height} /></label>
         <label>采样步数<input name="steps" type="number" min="4" max="30" required defaultValue={settings.data.steps} /></label>
+        <label>视频解码<select name="decodeMode" aria-label="视频解码" defaultValue={settings.data.decodeMode ?? "tiled"}><option value="tiled">分块解码（低显存）</option><option value="full">整段解码</option></select></label>
         <label>等待上限（秒）<input name="timeoutSeconds" type="number" min="300" max="7200" required defaultValue={settings.data.timeoutSeconds} /></label>
       </> : <>
       <label>执行部署<select name="deploymentId" defaultValue={settings.data.deploymentId ?? ""}>

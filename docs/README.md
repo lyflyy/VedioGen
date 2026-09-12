@@ -4,6 +4,14 @@
 
 ## 当前状态
 
+- 2026-09-12 项目筛选/搜索/分页、可恢复回收站、项目执行日志及上游错误详情已实现。真实复现 GetTokens `gpt-5.4-mini` 的 429：上游报告所有可用账号受限，页面可查看脱敏原文及请求 ID，不推断为余额不足。[实测记录](discussions/2026-09-12-project-management-and-errors.md) · [功能契约](specs/project-management-and-activity.md)。
+
+- 2026-09-12 混合路线基础能力已实现，浏览器复用历史真实 GPT 脚本与官网参考，完成 11 秒竖屏展示片、本地配乐、播放及下载；新文字 GPT 入口仍遭遇 429/502，本地动态试片因伪影拒绝采用。未宣布准确环绕、驾驶或 80 分验收完成。[实施与真实产物](discussions/2026-09-12-quality-route-implementation.md) · [执行契约](specs/quality-route-execution.md) · [长期目标](plans/2026-09-11-quality-route-execution.md)。
+
+- 2026-09-11 提出本地优先路线的下一批调整：保留现有架构，将自动配图生成升级为主体参考检查、逐镜头选路、关键试片和声音合成。先修质量决策，再做张雪样片与春风复用验证；方案待检阅，未修改生产代码。[路线与分批验收](plans/2026-09-11-quality-first-route.md) · [讨论与未决事项](discussions/2026-09-11-route-adjustment.md)。
+
+- 2026-09-11 通过 GitHub CLI 复核 MoneyPrinterTurbo、NarratoAI、Short Video Maker、ComfyUI、Wan2.2、OpenCut 的当前 README 与关键源码。结论：现有技术分层合理，但镜头制作策略、素材语义匹配、音画质量尚非本项目目标下的最佳实践；本轮仅研究，未修改生成代码。[版本、证据和优先级](research/2026-09-11-video-workflow-practices.md)。
+
 - 2026-09-10 原项目六镜头已实际通过本地 Wan 推理、合成、浏览器播放和下载；修复小数秒与错误素材绑定，增加后台准备、一键生成、逐镜头结果和免重复推理的画幅整理。技术链路完成，车型一致、真实 360 度与 80 分质量仍未验收。[真实执行记录](discussions/2026-09-10-original-storyboard-execution.md) · [本轮目标](plans/2026-09-10-storyboard-to-film.md) · [执行契约](specs/storyboard-material-preparation.md)。
 
 - 2026-09-10 已启动检阅服务并排查春风 450MT 的 429：历史 7 条失败调用不是活动任务；新增凭据级持久冷却、额度暂停/手动恢复、严格失败切换与次数限制，移除管理页静态“可用”。本轮未调用真实模型。[排查与执行规则](discussions/2026-09-10-model-429-and-scheduling.md)。

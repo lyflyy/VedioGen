@@ -60,7 +60,7 @@ def workflow(config: dict, shot: dict, image: str, prompt_id: str, seed: int, re
         "9": node("KSampler", model=["7", 0], positive=["5", 0], negative=["6", 0], latent_image=["8", 0],
                   seed=seed, steps=config["steps"], cfg=5.0, sampler_name="uni_pc", scheduler="simple", denoise=1.0),
         "10": (node("VAEDecodeTiled", samples=["9", 0], vae=["3", 0], tile_size=256, overlap=64, temporal_size=16, temporal_overlap=4)
-               if legacy else node("VAEDecode", samples=["9", 0], vae=["3", 0])),
+               if legacy or config.get("decodeMode") == "tiled" else node("VAEDecode", samples=["9", 0], vae=["3", 0])),
         "11": node("CreateVideo", images=["10", 0], fps=24.0),
         "12": node("SaveVideo", video=["11", 0], filename_prefix=f"vediogen/{prompt_id}",
                    **{"format": "mp4", "format.codec": "h264"}),
@@ -86,6 +86,8 @@ class ComfyVideoClient:
         stats = self.request("GET", "/system_stats")
         info = self.request("GET", "/object_info")
         missing = sorted(NODES - info.keys())
+        if "VAEDecodeTiled" not in info:
+            missing.append("VAEDecodeTiled")
         version = stats.get("system", {}).get("comfyui_version", "")
         try:
             supported = tuple(int(part) for part in version.split(".")[:3]) >= (0, 34, 0)

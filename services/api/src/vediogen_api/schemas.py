@@ -47,9 +47,15 @@ class ApprovalRequest(ApiModel):
     comment: str | None = Field(default=None, max_length=1000)
 
 
+class SoundPlan(ApiModel):
+    background: Literal["none", "local-pulse"] = "none"
+    narration: bool = False
+
+
 class StoryboardUpdate(ApiModel):
     shots: list[dict[str, Any]]
     total_duration_ms: int
+    sound_plan: SoundPlan | None = None
 
 
 class GenerationRequest(ApiModel):
@@ -57,7 +63,7 @@ class GenerationRequest(ApiModel):
     storyboard_version_id: str
     shot_id: str | None = Field(default=None, min_length=1)
     audio_asset_id: str | None = None
-    narration: bool = False
+    narration: bool | None = None
     quality: Literal["preview", "standard"] = "standard"
     confirm_video_cost: bool = False
 

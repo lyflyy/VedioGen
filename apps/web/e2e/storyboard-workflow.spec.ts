@@ -52,6 +52,13 @@ test('horizontal advice, persisted preparation progress, upload binding, save an
   const selected = page.getByRole('combobox', { name: '镜头素材', exact: true });
   const id = await selected.inputValue();
   expect(id).toBeTruthy();
+  const source = page.getByRole('combobox', { name: '来源', exact: true });
+  const originalStrategy = await source.inputValue();
+  await source.selectOption('image-to-video');
+  await expect(selected).toHaveValue(id);
+  await source.selectOption('image-motion');
+  await expect(selected).toHaveValue(id);
+  await source.selectOption(originalStrategy);
   await expect.poll(() => page.locator('.vertical-stage img').evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
   await expect(page.getByText('有未保存修改', { exact: true }).first()).toBeVisible();
   await page.getByRole('button', { name: '保存分镜', exact: true }).click();

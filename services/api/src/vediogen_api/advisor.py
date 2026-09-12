@@ -45,7 +45,7 @@ def _unwrap(outcome: tuple[int, dict]) -> dict:
 def create_advice(session: Session, project_id: str) -> dict:
     with _lock:
         project = session.get(ProjectRow, project_id)
-        if not project:
+        if not project or project.status == "deleted":
             raise HTTPException(404, "Project not found")
         session.refresh(project)
         fingerprint = _fingerprint(session, project)

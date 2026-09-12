@@ -184,7 +184,7 @@ def execute(run_id):
 def create_discovery(project_id: str, payload: DiscoveryInput, session: Session = Depends(get_session)):
     with lock:
         project = session.get(ProjectRow, project_id)
-        if not project:
+        if not project or project.status == "deleted":
             raise HTTPException(404, "Project not found")
         active = session.scalar(select(AssetDiscoveryRow).where(AssetDiscoveryRow.status.in_(("queued", "running"))))
         if active:
@@ -230,6 +230,8 @@ def import_candidate(project_id: str, run_id: str, candidate_id: str, payload: I
         if candidate.get("requiresVariantConfirmation") and not payload.confirm_variant:
             raise HTTPException(422, f"此素材为 {candidate['modelName']}，请明确确认采用该车型版本")
         project = session.get(ProjectRow, project_id)
+        if not project or project.status == "deleted":
+            raise HTTPException(404, "Project not found")
         if [m.get("text") for m in project.messages if m.get("role") == "user"] != [m.get("text") for m in row.request_data["messages"]]:
             raise HTTPException(409, "项目描述已改变，请重新准备素材后确认")
         existing = next((asset for asset in project.asset_versions if asset["id"] == candidate.get("assetId")), None)

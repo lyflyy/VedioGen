@@ -81,7 +81,7 @@ def test_editorial_duration_adapts_to_wan_frames(client, monkeypatch, duration):
 
 
 def test_probe_checks_model_files_and_minimum_server_version(monkeypatch):
-    info = {name: {} for name in NODES}
+    info = {name: {} for name in {*NODES, "VAEDecodeTiled"}}
     for kind, field, model in [("UNETLoader", "unet_name", DIFFUSION), ("CLIPLoader", "clip_name", ENCODER), ("VAELoader", "vae_name", VAE)]:
         info[kind] = {"input": {"required": {field: [[model]]}}}
     client = ComfyVideoClient("http://127.0.0.1:8188")
@@ -89,6 +89,19 @@ def test_probe_checks_model_files_and_minimum_server_version(monkeypatch):
     assert client.probe()["ready"] is True
     info["VAELoader"] = {}
     assert VAE in client.probe()["missing"]
+
+
+def test_new_low_memory_plan_uses_tiled_decode_without_changing_weights(client, monkeypatch):
+    from vediogen_api.video_settings import video_plan
+    monkeypatch.setattr(get_settings(), "allow_local_models", True)
+    client.put("/api/v1/admin/video-settings", json={"backend": "comfyui", "enabled": True})
+    shot = {"durationMs": 3000, "videoPrompt": "stationary motorcycle"}
+    with SessionLocal() as session:
+        config = video_plan(session, [shot])
+    graph = workflow(config, shot, "ref.png", str(uuid4()), 1)
+    assert graph["1"]["inputs"]["weight_dtype"] == "default"
+    assert graph["10"]["class_type"] == "VAEDecodeTiled"
+    assert graph["10"]["inputs"]["temporal_size"] == 16
 
 
 def test_adapter_uses_real_comfy_wire_format_and_targeted_cancel(monkeypatch):

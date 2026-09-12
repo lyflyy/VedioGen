@@ -118,6 +118,8 @@ test("creator uses fixture advice and real uploaded media to compose, retry and 
     await page.getByLabel("字幕", { exact: true }).fill(`镜头 ${index + 1} 上传素材`);
   }
   await page.screenshot({ path: testInfo.outputPath("storyboard-assets.png"), fullPage: true });
+  await page.getByRole("button", { name: "自动准备素材" }).click();
+  await expect(page.getByRole("region", { name: "素材准备结果" })).toContainText("素材已就绪");
   await page.getByRole("button", { name: "生成选项" }).click();
 
   await expect(page).toHaveURL(/\/generation$/);

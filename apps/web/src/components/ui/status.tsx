@@ -17,6 +17,7 @@ const labels: Record<string, string> = {
   interrupted: "服务中断",
   needs_attention: "需要处理",
   completed: "已完成",
+  deleted: "已删除",
   active: "可用",
   ready: "就绪",
   degraded: "降级",

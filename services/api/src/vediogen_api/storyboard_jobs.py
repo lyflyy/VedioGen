@@ -39,6 +39,9 @@ def latest(session, project_id):
 
 def enqueue(session, project):
     with lock:
+        session.refresh(project)
+        if project.status == "deleted":
+            raise HTTPException(404, "Project not found")
         previous = latest(session, project.id)
         if previous and previous.status in ("queued", "running"):
             return serialize(previous)
@@ -51,6 +54,9 @@ def enqueue(session, project):
             status="queued", data={"phase": "queued", "createdAt": timestamp(), "events": [],
             "briefId": brief.id, "messages": deepcopy(project.messages),
             "storyboardVersionId": None, "errorMessage": None, "warnings": []})
+        if previous and previous.data.get("briefId") == brief.id and previous.data.get("messages") == project.messages:
+            if previous.data.get("draftScript"):
+                row.data = {**row.data, "draftScript": deepcopy(previous.data["draftScript"])}
         session.add(row)
         session.commit()
         executor.submit(execute, row.id)
@@ -69,10 +75,8 @@ def update(run_id, phase=None, **fields):
 
 
 def prepare_images(session, project):
-    if any(a.get("kind") == "image" and a.get("status") == "ready" and Path(a.get("uri", "")).is_file() for a in project.asset_versions):
-        return []
     if not get_settings().allow_external_search:
-        return ["当前环境未启用素材检索，保留待准备镜头"]
+        return [] if project.asset_versions else ["当前环境未启用素材检索，保留待准备镜头"]
     brief = extract_asset_brief(session, project, project.messages)
     session.commit()
     if not brief["subject"] or brief.get("clarification"):
@@ -81,11 +85,17 @@ def prepare_images(session, project):
     exact = [c for c in candidates if not c.get("requiresVariantConfirmation")]
     if not exact:
         return [*warnings, "未找到精确车型的官网图片，请在资料页确认候选版本"]
-    # Keep the first official gallery group together rather than mixing colorways.
-    group = exact[0].get("context", "").split(" / 视角", 1)[0]
-    chosen = [c for c in exact if c.get("context", "").startswith(group)][:3]
-    warnings = [*warnings, f"自动采用候选：{group}。配色和视角尚未由用户确认"]
+    # Sample colorway groups before matching; the first gallery need not match the requested color.
+    groups = list(dict.fromkeys(c.get("context", "").split(" / 视角", 1)[0] for c in exact if "细节" not in c.get("context", "")))[:3]
+    chosen = [c for group in groups for c in [c for c in exact if c.get("context", "").split(" / 视角", 1)[0] == group][:2]]
+    if not chosen:
+        chosen = exact[:3]
+    chosen += [c for c in exact if "细节" in c.get("context", "") and c not in chosen][:2]
+    warnings = [*warnings, "已准备官网候选，配色和视角将在镜头匹配时检查；尚未由用户确认"]
     for candidate in chosen:
+        if any(a.get("sourceImageUrl") == candidate["imageUrl"] and a.get("status") == "ready"
+               and Path(a.get("uri", "")).is_file() for a in project.asset_versions):
+            continue
         content = fetch_public_image(candidate["imageUrl"])
         suffix, mime = (".png", "image/png") if content.startswith(b"\x89PNG\r\n\x1a\n") else (".jpg", "image/jpeg")
         asset_id = str(uuid4())
@@ -103,6 +113,7 @@ def prepare_images(session, project):
                 "sourceUrl": candidate["sourceUrl"], "sourceImageUrl": candidate["imageUrl"],
                 "fileName": f"{candidate['modelName']}-{candidate['referenceIndex']}{suffix}",
                 "uri": str(target.resolve()), "mimeType": mime, "sizeBytes": len(content),
+                "width": info["width"], "height": info["height"],
                 "sha256": "sha256:" + hashlib.sha256(content).hexdigest(), "createdAt": timestamp()}
             session.refresh(project)
             project.asset_versions = [*project.asset_versions, asset]
@@ -121,6 +132,7 @@ def assign_assets(session, project, data):
     config = read_settings(session)
     video_enabled = config["enabled"] and (get_settings().allow_local_models if config["backend"] == "comfyui" else get_settings().allow_external_models)
     changes = []
+    sound_plan = data.get("soundPlan")
     for index, shot in enumerate(shots, 1):
         source = assets.get(shot.get("sourceAssetId"))
         strategy = shot.get("sourceStrategy")
@@ -135,16 +147,44 @@ def assign_assets(session, project, data):
         if shot.get("sourceStrategy") == "image-to-video" and not str(shot.get("videoPrompt") or "").strip():
             shot["videoPrompt"] = "\n".join(str(shot.get(key) or "") for key in ("visual", "camera", "purpose"))[:2500]
             changes.append({"shotId": shot["id"], "order": index, "message": "已根据画面与运镜补齐生成描述"})
-    pending = [s for s in shots if not s.get("sourceAssetId") and s.get("sourceStrategy") in {"image-motion", "image-to-video"}]
+    pending = [s for s in shots if s.get("sourceStrategy") in {"image-motion", "image-to-video"}
+        and (not s.get("sourceAssetId") or s.get("selectionOwner") in {"platform", "user"})
+        and (s.get("requiresPlanning") or not (s.get("productionPlan") or {}).get("referenceChecked")
+             or (s.get("productionPlan") or {}).get("blocker"))]
     if images and pending:
         choices = match_storyboard_assets(session, project, pending, images)
+        if not data.get("soundPlanConfirmed") and choices.get("soundPlan"):
+            sound_plan = choices["soundPlan"]
         allowed = {a["id"] for a in images}
         for shot in pending:
             choice = next((c for c in choices["assignments"] if c["shotId"] == shot["id"]), None)
+            if not choice:
+                continue
+            previous_id = shot.get("sourceAssetId")
+            pinned = shot.get("selectionOwner") == "user" and previous_id in assets
+            blocker = choice.get("blocker", "")
+            if pinned and choice.get("assetId") != previous_id:
+                blocker = "您固定的参考图与本镜头要求不匹配，请更换素材或交由平台选择。" + choice["reason"]
+            if not pinned:
+                shot["sourceAssetId"] = choice.get("assetId")
+                shot["selectionOwner"] = "platform"
+            if shot.get("strategyOwner") == "platform" and choice.get("strategy") and not pinned:
+                shot["sourceStrategy"] = choice["strategy"]
+                if choice["strategy"] == "blender-3d":
+                    shot["sourceAssetId"] = None
+            if not choice.get("assetId") and not blocker:
+                blocker = "尚未找到与本镜头匹配的参考素材。" + choice["reason"]
+            shot["productionPlan"] = {"reason": choice["reason"], "blocker": blocker,
+                "needsPreview": choice.get("needsPreview", shot["sourceStrategy"] == "image-to-video"),
+                "exactOrbit": choice.get("exactOrbit", False), "referenceChecked": True,
+                "strategy": shot["sourceStrategy"]}
+            shot["requiresPlanning"] = False
             if choice and choice["assetId"] in allowed:
-                shot.update(sourceAssetId=choice["assetId"], fit="contain", materialNote=choice["reason"])
+                shot.update(materialNote=choice["reason"])
+                if not pinned:
+                    shot.update(fit="contain", backgroundFill="soft", referenceFraming="portrait-soft")
                 changes.append({"shotId": shot["id"], "order": shots.index(shot) + 1, "message": "已匹配参考图：" + choice["reason"]})
-    return {**data, "shots": shots, "materialChanges": changes}
+    return {**data, "shots": shots, "materialChanges": changes, **({"soundPlan": sound_plan} if sound_plan else {})}
 
 
 def execute(run_id):
@@ -166,9 +206,10 @@ def execute(run_id):
             version = (session.scalar(select(func.count()).select_from(DocumentRow).where(
                 DocumentRow.project_id == project.id, DocumentRow.kind == "storyboard")) or 0) + 1
             update(run_id, "writing-script", warnings=warnings)
-            data = generate_storyboard(session, project, brief, version)
+            data = deepcopy(run.data.get("draftScript")) or generate_storyboard(session, project, brief, version)
+            data["version"] = version
             session.commit()
-            update(run_id, "matching-assets")
+            update(run_id, "matching-assets", draftScript=deepcopy(data))
             data = assign_assets(session, project, data)
             data["materialWarnings"] = warnings
             session.commit()
@@ -211,7 +252,10 @@ def auto_materials(project_id: str, storyboard_id: str, session: Session = Depen
         original_version = row.row_version
         original_data = deepcopy(row.data)
     try:
-        warnings = prepare_images(session, project)
+        available = {a["id"] for a in project.asset_versions if a.get("status") == "ready" and Path(a.get("uri", "")).is_file()}
+        missing = any(s.get("sourceAssetId") not in available or s.get("requiresPlanning")
+            or (s.get("selectionOwner") == "platform" and not (s.get("productionPlan") or {}).get("referenceChecked")) for s in original_data["shots"])
+        warnings = prepare_images(session, project) if missing else original_data.get("materialWarnings", [])
         data = assign_assets(session, project, original_data)
         session.commit()
     except (PublicMediaError, MediaGenerationError, ModelGatewayError) as error:
@@ -238,7 +282,7 @@ def enqueue_materials(project_id: str, storyboard_id: str, generate: bool = Fals
     with lock, generation_lock:
         project = session.get(ProjectRow, project_id)
         board = session.get(DocumentRow, storyboard_id)
-        if not project or not board or board.kind != "storyboard" or board.project_id != project_id:
+        if not project or project.status == "deleted" or not board or board.kind != "storyboard" or board.project_id != project_id:
             raise HTTPException(404, "分镜不存在")
         previous = latest_materials(session, project_id)
         if previous and previous.status in ("queued", "running"):
@@ -287,6 +331,21 @@ def execute_materials(run_id):
                 changes=board.data.get("materialChanges", []), warnings=board.data.get("materialWarnings", []))
             checks = shot_readiness(project_id, board_id, session)
             generation_id = None
+            if run.data["generate"] and all(c.get("technicalReady") for c in checks["shots"]) and not checks["ready"]:
+                from .creator import create_generation, get_shot_preview
+                from .schemas import GenerationRequest
+                critical = next(s for s in board.data["shots"] if (s.get("productionPlan") or {}).get("needsPreview") and not s.get("previewRunId"))
+                with generation_lock:
+                    session.refresh(board)
+                    if board.row_version != prepared_version:
+                        raise ValueError("分镜已修改，未启动旧镜头试片，请重新准备")
+                    prior = get_shot_preview(project_id, board_id, critical["id"], session)["run"]
+                    if prior is None:
+                        prior = create_generation(GenerationRequest(projectId=project_id, storyboardVersionId=board_id,
+                            shotId=critical["id"], quality="preview"), session)
+                update(run_id, "reviewing-preview", status="needs_attention", checks=checks["shots"],
+                    previewGenerationRunId=prior["id"], previewShotId=critical["id"], completedAt=timestamp())
+                return
             if checks["ready"] and run.data["generate"]:
                 update(run_id, "starting-video", checks=checks["shots"])
                 from .creator import approve_storyboard, create_generation
@@ -296,7 +355,9 @@ def execute_materials(run_id):
                     if board.row_version != prepared_version:
                         raise ValueError("分镜已修改，未启动旧分镜的视频，请重新准备")
                     approve_storyboard(project_id, board_id, ApprovalRequest(), session)
-                    generation = create_generation(GenerationRequest(projectId=project_id, storyboardVersionId=board_id, quality="standard"), session)
+                    sound = board.data.get("soundPlan", {})
+                    generation = create_generation(GenerationRequest(projectId=project_id, storyboardVersionId=board_id, quality="standard",
+                        narration=sound.get("narration", False), audioAssetId=sound.get("audioAssetId")), session)
                     generation_id = generation["id"]
             update(run_id, "completed" if checks["ready"] else "needs-attention",
                 status="completed" if checks["ready"] else "needs_attention", checks=checks["shots"],
@@ -314,12 +375,14 @@ def shot_readiness(project_id: str, storyboard_id: str, session: Session = Depen
         raise HTTPException(404, "分镜不存在")
     checks = []
     for index, shot in enumerate(row.data["shots"], 1):
+        technical_ready = False
         try:
             build_plan(project, row, shot_id=shot["id"])
-            reason = None
+            technical_ready = True
+            reason = "请先生成此镜头试片，采用满意的结果后继续整片制作" if (shot.get("productionPlan") or {}).get("needsPreview") and not shot.get("previewRunId") else None
         except (ValueError, KeyError, TypeError, MediaGenerationError, RuntimeError) as error:
             reason = str(error)
-        checks.append({"shotId": shot["id"], "order": index, "ready": reason is None, "reason": reason})
+        checks.append({"shotId": shot["id"], "order": index, "ready": reason is None, "reason": reason, "technicalReady": technical_ready})
     return {"shots": checks, "ready": all(c["ready"] for c in checks)}
 
 
