@@ -155,6 +155,7 @@
           "items": { "type": "string", "minLength": 1, "maxLength": 200 }
         },
         "pacing": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "targetDurationMs": { "type": "integer", "minimum": 5000, "maximum": 60000 },
         "emotionalPeak": { "type": "string", "minLength": 1, "maxLength": 240 },
         "close": { "type": "string", "minLength": 1, "maxLength": 180 },
         "requiredAssets": {

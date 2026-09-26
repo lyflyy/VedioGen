@@ -30,9 +30,11 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import { ProjectHeader } from "@/components/project-header";
 import { ProjectActivity } from "@/components/project-activity";
+import { AdvisorExecution, advisorActivityPath, type AdvisorCall } from "@/components/advisor-execution";
 import { ReferencePreparation } from "@/components/reference-preparation";
 import { ImageCropDialog } from "@/components/image-crop-dialog";
 import { ShotPreview } from "@/components/shot-preview";
+import { ReferenceCutDialog } from "@/components/reference-cut-dialog";
 import { PreparationProgress, type PreparationRun } from "@/components/preparation-progress";
 import { Button } from "@/components/ui/button";
 import { Status } from "@/components/ui/status";
@@ -51,6 +53,12 @@ import type {
 } from "@/lib/types";
 
 type MaterialRun = {
+  shotId?: string | null;
+  inputVersion?: number;
+  createdAt?: string;
+  completedAt?: string;
+  warnings?: string[];
+  events?: Array<{ phase: string; at: string; message?: string }>;
   previewGenerationRunId?: string;
   previewShotId?: string;
   resultVersion?: number;
@@ -63,7 +71,25 @@ const materialPhases: Record<string, string> = {
   queued: "素材准备排队中", "preparing-assets": "正在检查素材、匹配参考图与生成方式",
   "checking-shots": "正在检查所有镜头", "starting-video": "正在启动视频生成",
   "reviewing-preview": "关键镜头已安排试片，请查看并采用满意的结果",
+  "identifying-subject": "正在确认素材主体", "searching-manufacturer": "正在检索官网参考图",
+  "searching-web": "正在检索网络参考图", "downloading-assets": "正在下载参考图",
+  "matching-assets": "正在检查画面并匹配镜头", failed: "素材准备失败", interrupted: "素材准备已中断",
+  "observing-assets": "大模型正在检查参考图", "planning-shots": "大模型正在匹配镜头素材",
 };
+
+function MaterialElapsed({ run }: { run: MaterialRun }) {
+  const [now, setNow] = useState(() => Date.now());
+  const active = ["queued", "running"].includes(run.status);
+  useEffect(() => {
+    if (!active) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active]);
+  if (!run.createdAt || (!active && !run.completedAt)) return null;
+  const seconds = Math.max(0, Math.floor(((active ? now : Date.parse(run.completedAt!)) - Date.parse(run.createdAt)) / 1000));
+  if (!Number.isFinite(seconds)) return null;
+  return <span>{active ? "已等待" : "耗时"} {Math.floor(seconds / 60)} 分 {seconds % 60} 秒</span>;
+}
 const sourceLabels: Record<string, string> = {
   "image-motion": "图片运镜", "image-to-video": "AI 动态视频", "user-video": "视频剪辑", "blender-3d": "三维渲染",
 };
@@ -89,10 +115,13 @@ export function ProjectWorkspace() {
   const [notice, setNotice] = useState("");
   const [savedShots, setSavedShots] = useState("");
   const [materials, setMaterials] = useState<MaterialRun | null>(null);
+  const submittingMaterials = useRef(false);
   const materialsActive = Boolean(materials && ["queued", "running"].includes(materials.status));
   const unsaved = Boolean(storyboard && JSON.stringify([storyboard.shots, storyboard.soundPlan]) !== savedShots);
   const preparing = Boolean(preparation && ["queued", "running"].includes(preparation.status));
   const advisorStarted = useRef(false);
+  const [advisorBaselineIds, setAdvisorBaselineIds] = useState<string[] | null>(null);
+  const lastSentFeedback = useRef("");
   const generationActive = Boolean(generation && ["queued", "running", "composing"].includes(generation.status));
 
   const hydrate = useCallback(async () => {
@@ -281,6 +310,15 @@ export function ProjectWorkspace() {
     } finally { setBusy(""); }
   }
 
+  const requestAdvice = useCallback(async (automatic = false) => {
+    const history = await api<{ items: AdvisorCall[] }>(advisorActivityPath(projectId)).catch(() => null);
+    if (automatic && history?.items[0]?.status === "failed") {
+      throw new Error(history.items[0].detail || "上次创意建议未完成，请调整要求或重试");
+    }
+    setAdvisorBaselineIds(history?.items.filter(item => item.status !== "calling").map(item => item.id) ?? null);
+    return post<AdvisorRun>(`/projects/${projectId}/advisor-runs`);
+  }, [projectId]);
+
   useEffect(() => {
     if (
       stage !== "strategy" ||
@@ -293,8 +331,9 @@ export function ProjectWorkspace() {
     advisorStarted.current = true;
     void Promise.resolve()
       .then(() => {
+        setAdvisorBaselineIds(null);
         setBusy("advisor");
-        return post<AdvisorRun>(`/projects/${projectId}/advisor-runs`);
+        return requestAdvice(true);
       })
       .then((result) => {
         setAdvisor(result);
@@ -304,7 +343,7 @@ export function ProjectWorkspace() {
         setError(reason.message);
       })
       .finally(() => setBusy(""));
-  }, [advisor, hydrate, projectId, stage, workspace]);
+  }, [advisor, hydrate, projectId, requestAdvice, stage, workspace]);
 
   async function chooseProposal(proposal: Proposal) {
     if (!advisor) return;
@@ -327,18 +366,19 @@ export function ProjectWorkspace() {
   }
 
   async function regenerateAdvice(feedback: string) {
+    setAdvisorBaselineIds(null);
     setBusy("feedback");
     setError("");
     try {
-      if (feedback.trim()) {
+      if (feedback.trim() && feedback.trim() !== lastSentFeedback.current && feedback.trim() !== workspace?.messages.at(-1)?.text.trim()) {
         await post(`/projects/${projectId}/messages`, {
           text: feedback,
           assetVersionIds: [],
         });
+        lastSentFeedback.current = feedback.trim();
+        setWorkspace(await api<Workspace>(`/projects/${projectId}/workspace`));
       }
-      const next = await post<AdvisorRun>(
-        `/projects/${projectId}/advisor-runs`,
-      );
+      const next = await requestAdvice();
       setAdvisor(next);
       await hydrate();
       return true;
@@ -425,19 +465,22 @@ export function ProjectWorkspace() {
     }
   }
 
-  async function autoMaterials(generateVideo = false) {
-    if (!storyboard) return;
+  async function autoMaterials(generateVideo = false, shotId?: string) {
+    if (!storyboard || submittingMaterials.current || materialsActive) return;
+    submittingMaterials.current = true;
     setBusy("auto-materials");
     setError("");
     setNotice("正在准备并匹配镜头素材");
     try {
-      if (!await saveStoryboard(storyboard.shots, false)) return;
+      if (unsaved && !await saveStoryboard(storyboard.shots, false)) return;
+      setBusy("auto-materials");
       setNotice("正在准备并匹配镜头素材");
-      const run = await post<MaterialRun>(`/projects/${projectId}/storyboards/${storyboard.id}/material-runs?generate=${generateVideo}`);
+      const scope = shotId ? `&shot_id=${encodeURIComponent(shotId)}` : "";
+      const run = await post<MaterialRun>(`/projects/${projectId}/storyboards/${storyboard.id}/material-runs?generate=${generateVideo}${scope}`);
       setMaterials(run);
       setNotice("");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "素材准备失败"); }
-    finally { setBusy(""); }
+    finally { submittingMaterials.current = false; setBusy(""); setNotice(""); }
   }
 
   async function generate() {
@@ -481,7 +524,7 @@ export function ProjectWorkspace() {
       <ProjectHeader project={workspace.project} activeStage={stage} unsaved={unsaved} />
       {stage === "logs" ? <ProjectActivity projectId={projectId} /> : null}
       {notice ? <div className="workspace-notice" role="status"><Check size={16} />{notice}</div> : null}
-      {stage === "storyboard" && storyboard?.materialWarnings?.length ? <div className="workspace-material-warnings">
+      {stage === "storyboard" && storyboard?.materialWarnings?.length && !(materials?.storyboardVersionId === storyboard.id && materials.warnings?.length) ? <div className="workspace-material-warnings">
         {storyboard.materialWarnings.map((warning) => <p key={warning}><AlertCircle size={15} />{warning}</p>)}
       </div> : null}
       {error ? (
@@ -508,6 +551,7 @@ export function ProjectWorkspace() {
           error={error}
           chooseProposal={chooseProposal}
           regenerateAdvice={regenerateAdvice}
+          baselineIds={advisorBaselineIds}
         />
       ) : null}
       {stage === "brief" ? (
@@ -522,9 +566,9 @@ export function ProjectWorkspace() {
           save={saveStoryboard}
           approve={approveStoryboard}
           busy={materialsActive ? "auto-materials" : busy}
-          materials={materials?.storyboardVersionId === storyboard?.id && (materialsActive || materials?.resultVersion === storyboard?.rowVersion) ? materials : null}
+          materials={materials?.storyboardVersionId === storyboard?.id ? materials : null}
           assets={workspace.assetVersions}
-          locked={generationActive || previewActive}
+          locked={generationActive || previewActive || materialsActive || busy === "auto-materials"}
           previewDisabled={generationActive || materialsActive}
           onPreviewActive={setPreviewActive}
           onPreviewAdopted={hydrate}
@@ -615,6 +659,7 @@ function Strategy({
   error,
   chooseProposal,
   regenerateAdvice,
+  baselineIds,
 }: {
   workspace: Workspace;
   advisor: AdvisorRun | null;
@@ -622,28 +667,15 @@ function Strategy({
   error: string;
   chooseProposal: (proposal: Proposal) => void;
   regenerateAdvice: (feedback: string) => Promise<boolean>;
+  baselineIds: string[] | null;
 }) {
   const [feedback, setFeedback] = useState("");
   async function submitFeedback(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = feedback.trim();
     if (!value) return;
-    if (await regenerateAdvice(value)) setFeedback("");
+    if (await regenerateAdvice(value)) setFeedback(current => current.trim() === value ? "" : current);
   }
-  if (!advisor)
-    return (
-      <div className="workspace-loading" role="status">
-        {error && !busy ? <AlertCircle /> : <LoaderCircle className="spin" />}
-        <div>
-          <strong>{error && !busy ? "创意建议未完成" : "正在形成创意判断"}</strong>
-          {error && !busy ? (
-            <Button variant="secondary" onClick={() => void regenerateAdvice("")}>
-              <RefreshCw size={16} />重新生成建议
-            </Button>
-          ) : <span>整理车型事实、视觉机会和制作约束</span>}
-        </div>
-      </div>
-    );
   return (
     <div className="advisor-layout">
       <aside className="conversation-rail">
@@ -659,10 +691,10 @@ function Strategy({
             {message.text}
           </div>
         ))}</details>
-        <div className="message-bubble ai-message">
+        {advisor ? <div className="message-bubble ai-message">
           <Sparkles size={16} />
           <p>{advisor.result.diagnosis.understoodGoal}</p>
-        </div>
+        </div> : null}
         <form className="conversation-input" onSubmit={submitFeedback}>
           <textarea
             aria-label="补充创意要求"
@@ -684,6 +716,10 @@ function Strategy({
         </form>
       </aside>
       <main className="advisor-main">
+        <AdvisorExecution projectId={workspace.project.id} busy={busy === "advisor" || busy === "feedback"} error={error} saved={Boolean(advisor)} baselineIds={baselineIds} inputCount={workspace.messages.length} assetCount={workspace.assetVersions.length} />
+        {error && !busy ? <Button variant="secondary" onClick={() => void regenerateAdvice(feedback.trim())}><RefreshCw size={16} />重新生成建议</Button> : null}
+        {advisor ? <>
+        {busy === "feedback" || error ? <p role="status">以下保留上一轮建议</p> : null}
         <section className="diagnosis-band">
           <div>
             <span className="section-kicker">内容判断</span>
@@ -763,6 +799,7 @@ function Strategy({
             </article>
           ))}
         </section>
+        </> : null}
       </main>
       <aside className="facts-panel advisor-facts">
         <div className="section-heading">
@@ -863,7 +900,7 @@ function BriefView({
         <dl>
           <div>
             <dt>目标时长</dt>
-            <dd>{brief.targetDurationMs / 1000} 秒</dd>
+            <dd>{brief.targetDurationMs == null ? "待按创意节奏确定" : `${brief.targetDurationMs / 1000} 秒`}</dd>
           </div>
           <div>
             <dt>画幅</dt>
@@ -932,7 +969,7 @@ function StoryboardView({
   assets: AssetVersion[];
   locked: boolean;
   upload: (file: File, shotId?: string) => Promise<void>;
-  autoMaterials: (generateVideo?: boolean) => Promise<void>;
+  autoMaterials: (generateVideo?: boolean, shotId?: string) => Promise<void>;
   materials: MaterialRun | null;
   unsaved: boolean;
   projectId: string;
@@ -998,12 +1035,27 @@ function StoryboardView({
         <div className="material-report-heading">
           {["queued", "running"].includes(materials.status) ? <LoaderCircle className="spin" size={18} /> : materials.status === "completed" ? <Check size={18} /> : <AlertCircle size={18} />}
           <strong>{materialPhases[materials.phase] ?? (materials.status === "completed" ? "素材已就绪" : materials.status === "needs_attention" ? `${materials.checks.filter((check) => !check.ready).length} 个镜头待处理` : "素材准备未完成")}</strong>
+          <span>{materials.shotId ? `镜头 ${storyboard.shots.findIndex(s => s.id === materials.shotId) + 1}` : "全部镜头"}</span>
+          <MaterialElapsed key={materials.id} run={materials} />
           {materials.checks.length ? <span>{materials.checks.filter((check) => check.ready).length} / {materials.checks.length} 镜头可生成{unsaved ? "（修改前）" : ""}</span> : null}
         </div>
+        {!["queued", "running"].includes(materials.status) && (materials.resultVersion ?? materials.inputVersion) !== undefined && (materials.resultVersion ?? materials.inputVersion) !== storyboard.rowVersion ? <p>此记录对应修改前的分镜，重新准备后将更新结果。</p> : null}
         {materials.errorMessage ? <p role="alert">{materials.errorMessage}</p> : null}
+        {materials.events?.length ? <details className="material-events" open={["queued", "running", "failed", "interrupted"].includes(materials.status)}>
+          <summary>执行记录</summary>
+          <ol>{materials.events.map((event, index) => <li key={`${event.at}-${index}`}><time dateTime={event.at}>{new Date(event.at).toLocaleTimeString("zh-CN", { hour12: false })}</time><span>{event.message ?? materialPhases[event.phase] ?? ({ completed: "素材检查完成", "needs-attention": "检查完成，部分镜头待处理" }[event.phase]) ?? event.phase}</span></li>)}</ol>
+        </details> : null}
+        {materials.warnings?.length ? <details><summary>素材检索说明（{materials.warnings.length}）</summary><ul>{materials.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></details> : null}
         {materials.changes.length ? <ul>{materials.changes.map((change, index) => <li key={`${change.shotId}-${index}`}>镜头 {change.order}：{change.message}</li>)}</ul>
           : materials.status === "completed" ? <p>现有素材已通过检查，无需重复准备。</p> : null}
         {materials.checks.filter((check) => !check.ready).map((check) => <button className="material-issue" key={check.shotId} onClick={() => setSelectedShot(check.shotId)}><span>镜头 {check.order}</span><span>{check.reason}</span><ChevronRight size={16} /></button>)}
+        {materials.previewShotId ? <Button variant="secondary" size="compact" onClick={() => {
+          setSelectedShot(materials.previewShotId!);
+          setTimeout(() => document.querySelector(".shot-preview")?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+        }}><Play size={16} />查看已安排的镜头试片</Button> : null}
+        {!["queued", "running", "completed"].includes(materials.status) && assets.some(a => a.kind === "image") ? <ReferenceCutDialog
+          key={storyboard.id} projectId={projectId} storyboard={storyboard} assets={assets} disabled={locked || Boolean(busy)}
+          save={async () => unsaved ? save(storyboard.shots) : storyboard} /> : null}
       </section> : null}
       <aside className="shot-timeline">
         <div className="timeline-heading">
@@ -1184,6 +1236,7 @@ function StoryboardView({
         {selectedAsset?.kind === "image" ? <ImageCropDialog key={`${selected.id}-${selectedAsset.id}`} projectId={projectId} asset={selectedAsset} disabled={locked || Boolean(busy)} onApply={(asset) => applyCrop(selected.id, asset)} /> : null}
         <Button variant="secondary" size="compact" disabled={!selectedAsset} onClick={() => setStoryboard({ ...currentStoryboard, status: "draft", shots: currentStoryboard.shots.map((shot) => shot.sourceStrategy === selected.sourceStrategy ? { ...shot, sourceAssetId: selected.sourceAssetId, selectionOwner: "user" } : shot) })}>应用到同类镜头</Button>
         </details>
+        <Button variant="secondary" disabled={locked || Boolean(busy)} onClick={() => void autoMaterials(false, selected.id)}><Sparkles size={16} />准备当前镜头素材</Button>
         <label className="upload-button media-upload"><Paperclip size={16} />添加素材<input type="file" accept="image/*,video/*,audio/*,.glb" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, selected.id); event.target.value = ""; }} /></label>
         <label>
           旁白
@@ -1216,7 +1269,7 @@ function StoryboardView({
       <footer className="approval-bar">
         <div>
           <strong>{storyboard.title}</strong>
-          <span>{locked ? "生成中，暂不可编辑" : unsaved ? "有未保存修改" : "已保存"}</span>
+          <span>{locked ? busy === "auto-materials" ? "素材准备中，暂不可编辑" : "生成中，暂不可编辑" : unsaved ? "有未保存修改" : "已保存"}</span>
         </div>
         <div className="storyboard-commands">
         <Button variant="ghost" onClick={approve} disabled={locked || Boolean(busy)}>生成选项</Button>

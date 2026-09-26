@@ -48,7 +48,8 @@ test('project activity shows actual model records and safely renders upstream er
     const response = await route.fetch();
     const data = await response.json();
     data.items.unshift({ id: 'isolated-error-fixture', at: new Date().toISOString(), category: 'model', title: 'storyboard-generator', status: 'failed', provider: '隔离测试中转站', model: 'gpt-error-fixture', requestId: 'request-429-e2e', errorCode: 'RATE_LIMITED', detail: 'HTTP 429\n上游返回（已脱敏）：\nmessage: Request rate exceeded <script>not executable</script>\ntype: rate_limit_error' });
-    data.total += 1;
+    data.items.push({ id: 'isolated-gateway-fixture', at: new Date().toISOString(), category: 'model', title: 'creative-advisor', status: 'failed', provider: '隔离测试中转站', model: 'gpt-gateway-fixture', errorCode: 'PROVIDER_UNAVAILABLE', detail: '模型平台返回 HTTP 502\n上游返回（已脱敏）：\n502 Bad Gateway: upstream connection reset\n响应诊断：\n请求接口：POST https://relay.example/v1/chat/completions\n响应类型：text/html\n响应体字节数：180\ncf-ray：ray-502-e2e' });
+    data.total += 2;
     await route.fulfill({ response, json: data });
   });
   await page.getByRole('button', { name: '刷新日志', exact: true }).click();
@@ -56,6 +57,11 @@ test('project activity shows actual model records and safely renders upstream er
   await expect(page.locator('.activity-list')).toContainText('Request rate exceeded <script>not executable</script>');
   await page.locator('.activity-list li').first().getByText('执行详情', { exact: true }).click();
   await expect(page.locator('.activity-list')).toContainText('request-429-e2e');
+  const gateway = page.locator('.activity-list li').filter({ hasText: 'gpt-gateway-fixture' });
+  await expect(gateway).toContainText('502 Bad Gateway: upstream connection reset');
+  await expect(gateway).toContainText('POST https://relay.example/v1/chat/completions');
+  await expect(gateway).toContainText('cf-ray：ray-502-e2e');
+  await expect(gateway).not.toContainText('该记录未保存上游原始说明');
   await expectNoSeriousA11yIssues(page);
   await page.screenshot({ path: testInfo.outputPath('activity-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });

@@ -25,7 +25,7 @@ test("admin configures and traces a model route without exposing the API key", a
   await page.getByRole("button", { name: "创建平台" }).click();
   await expect(page.getByText(providerName)).toBeVisible();
 
-  await page.getByRole("link", { name: "API Key" }).click();
+  await page.getByRole("link", { name: "API Key", exact: true }).click();
   await page.getByLabel("模型平台").selectOption({ label: providerName });
   await page.getByLabel("凭据别名").fill(credentialAlias);
   await page.getByLabel("API Key").fill(secret);

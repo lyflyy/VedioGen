@@ -43,6 +43,7 @@ ADVISOR_WIRE_SCHEMA = strict_object(
                     "corePromise": STRING,
                     "visualPayoffs": STRING_LIST,
                     "pacing": STRING,
+                    "targetDurationMs": {"type": "integer", "minimum": 5000, "maximum": 60000},
                     "emotionalPeak": STRING,
                     "close": STRING,
                     "requiredAssets": STRING_LIST,
@@ -112,6 +113,7 @@ executionContext 是当前工程能力边界；未实现、未启用或尚未验
 项目标题中的本地实测、工程验证、待验收等是内部管理标签，不是车辆实测事实或视频文案要求，不写进成片。创意以用户消息为准。
 真实车型模式下不得虚构车型参数或把无法验证的性能当成事实。明确素材不足造成的车型一致性风险。
 用户对第一镜、最后一镜、必需场景和人物服装等明确要求属于硬约束，三个方案都必须保留；后续补充消息的优先级高于早期消息。
+targetDurationMs 必须与用户要求及 pacing 的结束时间一致，不套用固定 12 秒模板。人物与车辆同框需要包含人物、车辆和场景的首帧，只有车辆参考图不代表人物场景素材已就绪。imageGeneration 未接入时在 limitations 明示平台仍需准备场景首帧，不删除人物需求。
 输出必须使用简体中文（proposalKey 除外），严格符合给定 JSON Schema，不要输出 Markdown。"""
 
 
@@ -124,5 +126,6 @@ def storyboard_system_prompt() -> str:
 所有用户指定的中段场景和动作同样是硬约束，origin 必须为 user-required，不能归为 ai-proposed 后省略。完整360度环绕不能改写为‘环绕感’或小角度横移；沙漠、涉水、抬头、山林等具体要求必须明确出现在 action/scene/description 中，不能只写成抽象情绪或节奏。缺少资产时保留原要求并标明缺口。
 source strategy 要诚实：静态照片可用 image-motion，需要创造运动画面时用 image-to-video 或 generated-video，需要精确环绕时可用 blender-3d。
 image-motion 当前仅执行原图居中缓慢推近，不改变拍摄角度；不要为该策略编写真实横向机位移动、正面转侧面、环绕或主体运动。不同视角应使用不同参考图分镜切换。
+人物的身份、服装、与车辆的互动及场景必须进入对应镜头的 subject/action/scene/mustShow，不能仅写在创意说明中。人物与车辆同框的 image-to-video 需要同框首帧，不假定车辆照片能凭提示词稳定补出人物。有限角度或近似展台展示不擅自升级为精确完整 360 度。
 混合制作：车灯、漆面、仪表等静态细节优先 image-motion，避免模型重绘真实结构和读数；有限角度动态展示可用 image-to-video。不要为炫酷而让每镜都生成运动。不要求驾驶时不主动加入高风险驾驶镜头。所有字幕最多40字；短旁白必须能在镜头时长内自然读完，不能用过量旁白挤压画面。
-总时长控制在 12 至 30 秒，输出简体中文并严格符合 JSON Schema，不要输出 Markdown。"""
+所有镜头 durationMs 之和必须等于 Creative Brief.targetDurationMs，不为适应单镜模型限制而缩短整片；长动作可拆镜。历史 Brief 缺少目标时长时依据用户消息与 pacing 安排，不默认 12 秒；若历史目标字段与明确节奏冲突，遵循用户最新要求并在 continuityRules 中说明冲突。输出简体中文并严格符合 JSON Schema，不要输出 Markdown。"""

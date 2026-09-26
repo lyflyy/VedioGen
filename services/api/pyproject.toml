@@ -15,6 +15,7 @@ dependencies = [
   "ddgs>=9,<10",
   "pillow>=12.1,<13",
   "psutil>=7,<8",
+  "httpx-sse>=0.4,<0.5",
 ]
 
 [dependency-groups]

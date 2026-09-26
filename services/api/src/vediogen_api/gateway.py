@@ -38,6 +38,11 @@ def _media_execution_context(session: Session, project: ProjectRow) -> dict[str,
         "inputMode": "with-assets" if project.asset_versions else "text-only",
         "assetPreparationOwner": "platform",
         "referenceSearchAllowed": get_settings().allow_external_search,
+        "imageGeneration": {
+            "implemented": False,
+            "purpose": "Prepare a scene first frame containing all required subjects before image-to-video.",
+            "limitation": "Reference search is not scene generation; vehicle-only photos do not establish a person, pose or setting.",
+        },
         "imageToVideo": {
             "backend": config["backend"],
             "enabled": config["enabled"],
@@ -46,6 +51,7 @@ def _media_execution_context(session: Session, project: ProjectRow) -> dict[str,
             "durationRangeMs": {"min": 500, "max": 5000} if local else None,
             "durationAdaptation": "Editorial milliseconds are preserved; the platform rounds up model frames and trims output." if local else "Use one of durationOptionsMs.",
             "requiresConfirmedReference": True,
+            "referenceRequirements": "The first frame must show the required people, vehicle and setting; do not invent absent people from vehicle-only references.",
             "verification": "configuration-only; not proof of model readiness or output quality",
         },
         "implementedMediaStrategies": ["image-motion", "user-video", "image-to-video", "blender-3d"],
@@ -144,6 +150,7 @@ def generate_storyboard(session: Session, project: ProjectRow, brief: DocumentRo
             user_prompt=prompt,
             image_assets=project.asset_versions,
             timeout_seconds=deployment.timeout_seconds,
+            stream=True,
         )
         Draft202012Validator(STORYBOARD_WIRE_SCHEMA).validate(completion.value)
         return _runtime_storyboard(project, brief, version, completion.value), completion
@@ -151,7 +158,7 @@ def generate_storyboard(session: Session, project: ProjectRow, brief: DocumentRo
     return _invoke_routed(session, "storyboard-generator", project.id, project.title, fake, real)
 
 
-def observe_reference_images(session, project, assets):
+def observe_reference_images(session, project, assets, progress=None):
     route = session.scalar(select(RoutingVersionRow).where(RoutingVersionRow.status == "published").order_by(RoutingVersionRow.version.desc()))
     deployments = [(d.id, d.physical_model_id, d.provider_id) for d in session.scalars(select(ModelDeploymentRow))]
     observations = []
@@ -167,8 +174,12 @@ def observe_reference_images(session, project, assets):
         cached = next((r for r in session.scalars(select(DocumentRow).where(DocumentRow.project_id == project.id,
             DocumentRow.kind == "reference-observation")) if r.data.get("cacheKey") == cache_key), None)
         if cached:
+            if progress:
+                progress("observing-assets", message=f"已复用参考图 {offset + 1}-{offset + len(batch)} 的视觉检查结果")
             observations.extend(cached.data["observations"])
             continue
+        if progress:
+            progress("observing-assets", message=f"大模型正在检查参考图 {offset + 1}-{offset + len(batch)}，共 {len(assets)} 张")
         schema = {"type": "object", "additionalProperties": False, "required": ["observations"], "properties": {
             "observations": {"type": "array", "minItems": len(batch), "maxItems": len(batch), "items": {
                 "type": "object", "additionalProperties": False, "required": ["assetId", "description", "limitations"], "properties": {
@@ -194,8 +205,10 @@ def observe_reference_images(session, project, assets):
     return observations
 
 
-def match_storyboard_assets(session, project, shots, assets):
-    observations = observe_reference_images(session, project, assets)
+def match_storyboard_assets(session, project, shots, assets, progress=None):
+    observations = observe_reference_images(session, project, assets, progress)
+    if progress:
+        progress("planning-shots", message=f"大模型正在为 {len(shots)} 个镜头选择参考图并检查制作条件")
     schema = {"type": "object", "additionalProperties": False, "required": ["assignments", "soundPlan"], "properties": {
         "soundPlan": {"type": "object", "additionalProperties": False, "required": ["background", "narration"], "properties": {
             "background": {"type": "string", "enum": ["none", "local-pulse"]}, "narration": {"type": "boolean"}}},
@@ -211,7 +224,8 @@ def match_storyboard_assets(session, project, shots, assets):
     def real(provider, deployment, key):
         completion = complete_json(base_url=provider.base_url, api_key=key, model_id=deployment.physical_model_id,
             schema_name="vediogen_asset_matching", schema=schema,
-            system_prompt="根据逐张视觉观察和项目目标，为每个镜头选择参考与制作方式。只返回已有ID，每镜一项。品牌型号以明确来源为依据、视觉观察用于排除错配；同主体同配色优先。无匹配素材返回null，不拿其他车辆或骑手图片填空。细节、仪表读数与静态展示优先image-motion保真；实际动作需要image-to-video并needsPreview=true；准确完整360度必须exactOrbit=true及blender-3d，blocker说明需准确GLB或真实环绕视频。有限角度不算精确360度。用户明确只用图片则保留，不升级模型；不得改变镜头要求。用户固定的素材只要适合当前镜头就返回原ID，不能因为有更优候选就当作冲突；确实不匹配时blocker描述冲突。无阻断时blocker留空，不把普通风险全部当阻断。理由简洁中文，说明选路与风险。声音计划：摩托车宣传展示推荐local-pulse本地电子节奏，它不是车型真实引擎录音；用户要求无音乐则none。仅当脚本有旁白且用户希望配音时narration=true。",
+            system_prompt="人物同框镜头必须检查首帧中确实可见所需人物、车辆与场景。仅有车辆的产品照片不能作为已就绪的人物场景首帧；无合适首帧时 assetId=null，blocker 具体说明平台待生成哪些人物与场景，不要求用户必须上传，不假设图生视频会自动补出缺失人物。\n"
+            "根据逐张视觉观察和项目目标，为每个镜头选择参考与制作方式。只返回已有ID，每镜一项。品牌型号以明确来源为依据、视觉观察用于排除错配；同主体同配色优先。无匹配素材返回null，不拿其他车辆或骑手图片填空。细节、仪表读数与静态展示优先image-motion保真；实际动作需要image-to-video并needsPreview=true；准确完整360度必须exactOrbit=true及blender-3d，blocker说明需准确GLB或真实环绕视频。有限角度不算精确360度。用户明确只用图片则保留，不升级模型；不得改变镜头要求。用户固定的素材只要适合当前镜头就返回原ID，不能因为有更优候选就当作冲突；确实不匹配时blocker描述冲突。无阻断时blocker留空，不把普通风险全部当阻断。理由简洁中文，说明选路与风险。声音计划：摩托车宣传展示推荐local-pulse本地电子节奏，它不是车型真实引擎录音；用户要求无音乐则none。仅当脚本有旁白且用户希望配音时narration=true。",
             user_prompt=json.dumps({"messages": project.messages, "shots": shots, "executionContext": _media_execution_context(session, project),
                 "observations": observations, "assets": [{k: a.get(k) for k in
                 ("id", "fileName", "subject", "referenceContext")} for a in assets]}, ensure_ascii=False),

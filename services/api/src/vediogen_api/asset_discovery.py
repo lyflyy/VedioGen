@@ -53,6 +53,20 @@ def compact(value: str) -> str:
 
 def matches_subject(subject: str, title: str) -> bool:
     # Brand aliases are explicit; a matching model number alone must not merge manufacturers.
+    if "杜卡迪" in subject or "ducati" in subject.casefold():
+        normalized = re.sub(r"[\s_-]+", " ", title.casefold())
+        if not ("杜卡迪" in title or "ducati" in normalized):
+            return False
+        code = re.search(r"v\s*([24](?:\s*s|\s*r)?)\b", subject.casefold())
+        if code:
+            token = re.sub(r"\s+", "", code[0])
+            title_code = re.sub(r"v\s+([24])", r"v\1", normalized)
+            if not re.search(r"(?<![a-z0-9])" + re.escape(token) + r"(?![a-z0-9])", title_code):
+                return False
+            for family in ("panigale", "streetfighter", "multistrada"):
+                if family in subject.casefold() and family not in normalized:
+                    return False
+            return True
     aliases = {"春风": ("春风", "cfmoto", "cf-moto"), "张雪": ("张雪", "zxmoto", "zx moto")}
     for brand, names in aliases.items():
         if any(compact(name) in compact(subject) for name in names):
@@ -93,6 +107,8 @@ def search_images(subject: str, focus: str = "") -> tuple[list[dict], list[str]]
         queries.append(subject.replace("春风", "CFMOTO") + " motorcycle")
     if "张雪" in subject:
         queries.append(subject.replace("张雪", "ZXMOTO") + " motorcycle")
+    if "杜卡迪" in subject:
+        queries.append(subject.replace("杜卡迪", "Ducati ") + " motorcycle")
     if focus:
         queries = [f"{query} {focus}" for query in queries]
     candidates, seen, warnings = [], set(), []

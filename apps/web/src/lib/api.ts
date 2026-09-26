@@ -21,7 +21,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const problem = await response.json().catch(() => null);
-    throw new ApiError(problem?.detail ?? problem?.title ?? `请求失败 (${response.status})`, response.status, problem?.detail);
+    const detail = typeof problem?.detail === "string" ? problem.detail : Array.isArray(problem?.detail)
+      ? problem.detail.map((item: { loc?: string[]; msg?: string }) => `${item.loc?.join(".") ?? "参数"}: ${item.msg ?? "无效"}`).join("\n") : undefined;
+    throw new ApiError(detail ?? problem?.title ?? `请求失败 (${response.status})`, response.status, detail);
   }
   return response.json() as Promise<T>;
 }

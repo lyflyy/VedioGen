@@ -80,6 +80,19 @@ def test_upstream_error_keeps_reason_and_request_id_but_redacts_secrets():
     assert not any(text in message for text in ("actual-private-key", "private customer input", "sk-leaked-token", "not-whitelisted"))
 
 
+def test_activity_capability_filter_runs_before_pagination(client):
+    pid = create(client)
+    assert client.post(f"/api/v1/projects/{pid}/advisor-runs").status_code == 202
+    with SessionLocal() as session:
+        deployment = session.scalar(select(ModelDeploymentRow))
+        session.add(ModelInvocationRow(id=str(uuid4()), project_id=pid, capability_alias="storyboard-generator",
+            routing_policy_version_id="route", deployment_id=deployment.id, credential_id="private-key-ref", status="calling"))
+        session.commit()
+    data = client.get(f"/api/v1/projects/{pid}/activity?category=model&capabilityAlias=creative-advisor&pageSize=1").json()
+    assert data["total"] == 1 and data["items"][0]["title"] == "creative-advisor"
+    assert data["items"][0]["status"] == "succeeded"
+
+
 @pytest.mark.parametrize("body", [[], None, "error"])
 def test_unstructured_error_payload_does_not_crash(body):
     with pytest.raises(OpenAICompatibleError, match="HTTP 429"):

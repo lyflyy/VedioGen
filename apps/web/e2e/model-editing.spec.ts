@@ -1,0 +1,61 @@
+import { expect, test } from '@playwright/test';
+import { expectNoHorizontalOverflow, expectNoSeriousA11yIssues } from './helpers';
+
+test('existing platform, key and model can be edited and reprobed without revealing secrets', async ({ page }, testInfo) => {
+  const suffix = Date.now();
+  const providerId = `edit-model-${suffix}`;
+  await page.request.post('/api/v1/admin/model-providers', { data: { id: providerId, displayName: `Edit Platform ${suffix}`, adapterType: 'fake', baseUrl: 'https://before.example/v1' } });
+  const key = await (await page.request.post('/api/v1/admin/model-credentials', { data: { providerId, alias: `Edit Key ${suffix}`, secret: 'isolated-original-key-1111' } })).json();
+  const model = await (await page.request.post('/api/v1/admin/model-deployments', { data: { providerId, credentialId: key.id, displayName: `Edit Model ${suffix}`, physicalModelId: 'before-model', capabilities: ['text', 'structured-output', 'zh-CN'], timeoutSeconds: 60 } })).json();
+  await page.request.post(`/api/v1/admin/model-deployments/${model.id}/probe`);
+  page.on('dialog', dialog => dialog.accept());
+
+  await page.goto('/admin/model-providers');
+  await page.getByRole('button', { name: `编辑平台：Edit Platform ${suffix}`, exact: true }).click();
+  await expect(page.getByLabel('平台 ID')).toBeDisabled();
+  await expect(page.getByLabel('Base URL')).toHaveValue('https://before.example/v1');
+  await page.getByLabel('Base URL').fill('https://after.example/v1');
+  await page.getByLabel('显示名称').fill(`Edited Platform ${suffix}`);
+  await page.getByRole('button', { name: '保存平台', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: '平台配置已保存' })).toBeVisible();
+  await page.reload();
+  await expect(page.locator('.config-row').filter({ hasText: `Edited Platform ${suffix}` })).toContainText('https://after.example/v1');
+
+  await page.goto('/admin/credentials');
+  await page.getByRole('button', { name: `编辑凭据：Edit Key ${suffix}`, exact: true }).click();
+  await expect(page.getByLabel('API Key', { exact: true })).toHaveValue('');
+  await page.getByLabel('凭据别名').fill(`Edited Key ${suffix}`);
+  await page.getByLabel('API Key', { exact: true }).fill('isolated-replacement-key-2222');
+  await page.getByRole('button', { name: '保存凭据', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: '凭据已加密保存' })).toBeVisible();
+  await expect(page.getByLabel('API Key', { exact: true })).toHaveValue('');
+  expect(await page.locator('body').textContent()).not.toContain('isolated-replacement-key-2222');
+  expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain('isolated-replacement-key-2222');
+  await expect(page.locator('.config-row').filter({ hasText: `Edited Key ${suffix}` })).toContainText('2222');
+
+  await page.goto('/admin/deployments');
+  const row = page.locator('.deployment-row').filter({ hasText: `Edit Model ${suffix}` });
+  await expect(row).toContainText('草稿');
+  await row.getByRole('button', { name: `编辑模型：Edit Model ${suffix}`, exact: true }).click();
+  await expect(page.getByRole('combobox', { name: '模型平台', exact: true })).toHaveValue(providerId);
+  await expect(page.getByLabel('调用凭据')).toHaveValue(key.id);
+  await expect(page.getByLabel('调用凭据').locator('option')).toHaveCount(2);
+  await page.getByLabel('物理模型 ID').fill('after-model');
+  await page.getByLabel('超时（秒）').fill('180');
+  await page.getByLabel('上下文上限（Token）').fill('64000');
+  await expectNoSeriousA11yIssues(page);
+  await page.screenshot({ path: testInfo.outputPath('model-editor-desktop.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: testInfo.outputPath('model-editor-mobile.png'), fullPage: true });
+  await page.getByRole('button', { name: '保存模型', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: '模型配置已保存' })).toBeVisible();
+  await page.reload();
+  await row.getByRole('button', { name: `编辑模型：Edit Model ${suffix}`, exact: true }).click();
+  await expect(page.getByLabel('物理模型 ID')).toHaveValue('after-model');
+  await expect(page.getByLabel('超时（秒）')).toHaveValue('180');
+  await expect(page.getByLabel('上下文上限（Token）')).toHaveValue('64000');
+  await page.getByRole('button', { name: '取消编辑', exact: true }).click();
+  await row.getByRole('button', { name: '能力探测', exact: true }).click();
+  await expect(row.getByText('就绪', { exact: true })).toBeVisible();
+});

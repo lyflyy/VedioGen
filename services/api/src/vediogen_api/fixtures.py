@@ -22,6 +22,7 @@ def build_project_facts(project_id: str, title: str, message: str, platform: str
 
 def build_advisor_result(project_id: str, title: str, fact_ids: list[str]) -> dict:
     common = {
+        "targetDurationMs": 12000,
         "audience": ["关注真实车型质感的摩托车用户"],
         "resourceEstimate": "medium",
         "estimatedDifficulty": "medium",
@@ -115,12 +116,12 @@ def build_brief(project_id: str, proposal: dict, version: int) -> dict:
         "pacing": proposal["pacing"],
         "emotionalPeak": proposal["emotionalPeak"],
         "cta": "你最想看哪一个机械细节？",
-        "mustKeep": proposal["visualPayoffs"][:2],
+        "mustKeep": list(dict.fromkeys([proposal["hook"]["visual"], *proposal["visualPayoffs"]])),
         "mustNotInvent": ["未确认的车辆参数", "不存在的品牌配置"],
         "targetPlatform": "douyin",
         "locale": "zh-CN",
         "aspectRatio": "9:16",
-        "targetDurationMs": 12000,
+        "targetDurationMs": proposal.get("targetDurationMs"),
         "resourceEstimate": proposal["resourceEstimate"],
     }
 

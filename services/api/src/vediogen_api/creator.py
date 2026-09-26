@@ -137,11 +137,13 @@ def restore_project(project_id: str, session: Session = Depends(get_session)) ->
 
 @router.get("/projects/{project_id}/activity")
 def get_activity(project_id: str, category: str | None = None, offset: int = Query(0, ge=0),
-        page_size: int = Query(50, alias="pageSize", ge=1, le=100), session: Session = Depends(get_session)) -> dict:
+        page_size: int = Query(50, alias="pageSize", ge=1, le=100), capability_alias: str | None = Query(None, alias="capabilityAlias"), session: Session = Depends(get_session)) -> dict:
     from .project_activity import activity
     items = activity(session, get_project_or_404(session, project_id))
     if category:
         items = [item for item in items if item["category"] == category]
+    if capability_alias:
+        items = [item for item in items if item["category"] == "model" and item["title"] == capability_alias]
     return {"items": items[offset:offset + page_size], "total": len(items),
         "nextCursor": offset + page_size if offset + page_size < len(items) else None}
 

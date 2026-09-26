@@ -4,6 +4,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from pydantic import ValidationError
 
 from .config import get_settings
 from . import model_backoff
@@ -27,6 +28,22 @@ from .serializers import credential, deployment, invocation, provider, routing_d
 router = APIRouter(prefix="/admin")
 secret_store = LocalEncryptedSecretStore(get_settings().data_dir / "secrets")
 playground_runs: dict[str, dict] = {}
+
+
+def validated_patch(schema, existing, payload):
+    try:
+        return schema.model_validate({**existing, **payload})
+    except ValidationError as error:
+        raise HTTPException(422, "；".join(f"{'.'.join(map(str, item['loc']))}: {item['msg']}" for item in error.errors())) from error
+
+
+def invalidate_deployments(session, *, provider_id=None, credential_id=None):
+    query = select(ModelDeploymentRow)
+    query = query.where(ModelDeploymentRow.provider_id == provider_id) if provider_id else query.where(ModelDeploymentRow.credential_id == credential_id)
+    for item in session.scalars(query):
+        if item.status != "disabled":
+            item.status = "draft"
+            item.row_version += 1
 
 
 def provider_or_404(session: Session, provider_id: str) -> ModelProviderRow:
@@ -77,6 +94,12 @@ def create_provider(payload: ProviderInput, session: Session = Depends(get_sessi
 @router.patch("/model-providers/{provider_id}")
 def update_provider(provider_id: str, payload: dict, session: Session = Depends(get_session)) -> dict:
     row = provider_or_404(session, provider_id)
+    fields = {"displayName": row.display_name, "adapterType": row.adapter_type, "baseUrl": row.base_url, "region": row.region, "enabled": row.enabled}
+    if "id" in payload and payload["id"] != provider_id:
+        raise HTTPException(422, "平台 ID 不可修改")
+    values = validated_patch(ProviderInput, {"id": row.id, **fields}, payload).model_dump(by_alias=True)
+    if values["baseUrl"] != row.base_url or values["adapterType"] != row.adapter_type:
+        invalidate_deployments(session, provider_id=row.id)
     for api_name, attr_name in {
         "displayName": "display_name",
         "adapterType": "adapter_type",
@@ -84,8 +107,7 @@ def update_provider(provider_id: str, payload: dict, session: Session = Depends(
         "region": "region",
         "enabled": "enabled",
     }.items():
-        if api_name in payload:
-            setattr(row, attr_name, payload[api_name])
+        setattr(row, attr_name, values[api_name])
     row.status = "active" if row.enabled else "disabled"
     row.row_version += 1
     session.commit()
@@ -158,16 +180,37 @@ def probe_credential(credential_id: str, session: Session = Depends(get_session)
 
 @router.post("/model-credentials/{credential_id}/rotation")
 def rotate_credential(credential_id: str, payload: dict, session: Session = Depends(get_session)) -> dict:
+    if not payload.get("secret"):
+        raise HTTPException(422, "需要填写新的 Key")
+    return update_credential(credential_id, payload, session)
+
+
+@router.patch("/model-credentials/{credential_id}")
+def update_credential(credential_id: str, payload: dict, session: Session = Depends(get_session)) -> dict:
     row = credential_or_404(session, credential_id)
+    if set(payload) - {"alias", "secret"}:
+        raise HTTPException(422, "仅支持修改凭据别名和 Key，所属平台不可修改")
+    alias = payload.get("alias", row.alias)
+    if not isinstance(alias, str) or not alias.strip() or len(alias) > 100:
+        raise HTTPException(422, "凭据别名需为 1 至 100 字")
     secret = payload.get("secret")
-    if not isinstance(secret, str) or not secret:
-        raise HTTPException(status_code=422, detail="A new secret is required")
-    secret_store.put(row.secret_ref, secret)
-    row.last_four = secret[-4:].rjust(4, "*")
-    row.status = "active"
-    cooldown = session.get(ModelCooldownRow, row.id)
-    if cooldown:
-        session.delete(cooldown)
+    if secret is not None and (not isinstance(secret, str) or not secret.strip() or len(secret) > 4096):
+        raise HTTPException(422, "Key 不可为空，且不能超过 4096 字符")
+    if secret:
+        try:
+            previous = secret_store.get(row.secret_ref)
+        except (KeyError, ValueError):
+            previous = None
+        if secret != previous:
+            secret_store.put(row.secret_ref, secret)
+            row.last_four = secret[-4:].rjust(4, "*")
+            row.last_success_at = None
+            row.status = "active"
+            invalidate_deployments(session, credential_id=row.id)
+            cooldown = session.get(ModelCooldownRow, row.id)
+            if cooldown:
+                session.delete(cooldown)
+    row.alias = alias.strip()
     session.commit()
     return credential(row)
 
@@ -223,6 +266,8 @@ def create_deployment(payload: DeploymentInput, session: Session = Depends(get_s
     credential_row = credential_or_404(session, payload.credential_id)
     if credential_row.provider_id != payload.provider_id:
         raise HTTPException(status_code=422, detail="Credential and provider do not match")
+    if credential_row.status != "active":
+        raise HTTPException(422, "请选择有效凭据")
     row = ModelDeploymentRow(
         id=str(uuid4()),
         display_name=payload.display_name,
@@ -242,17 +287,26 @@ def create_deployment(payload: DeploymentInput, session: Session = Depends(get_s
 @router.patch("/model-deployments/{deployment_id}")
 def update_deployment(deployment_id: str, payload: dict, session: Session = Depends(get_session)) -> dict:
     row = deployment_or_404(session, deployment_id)
+    fields = {"displayName": row.display_name, "providerId": row.provider_id, "physicalModelId": row.physical_model_id,
+        "credentialId": row.credential_id, "capabilities": row.capabilities, "timeoutSeconds": row.timeout_seconds, "maxContextTokens": row.max_context_tokens}
+    values = validated_patch(DeploymentInput, fields, payload).model_dump(by_alias=True)
+    provider_or_404(session, values["providerId"])
+    key = credential_or_404(session, values["credentialId"])
+    if key.provider_id != values["providerId"] or key.status != "active":
+        raise HTTPException(422, "请选择该平台的有效凭据")
+    changed = any(values[name] != fields[name] for name in fields if name != "displayName")
     for api_name, attr_name in {
         "displayName": "display_name",
+        "providerId": "provider_id",
         "physicalModelId": "physical_model_id",
         "credentialId": "credential_id",
         "capabilities": "capabilities",
         "timeoutSeconds": "timeout_seconds",
         "maxContextTokens": "max_context_tokens",
     }.items():
-        if api_name in payload:
-            setattr(row, attr_name, payload[api_name])
-    row.status = "draft"
+        setattr(row, attr_name, values[api_name])
+    if changed:
+        row.status = "draft"
     row.row_version += 1
     session.commit()
     return deployment(row)
@@ -261,6 +315,9 @@ def update_deployment(deployment_id: str, payload: dict, session: Session = Depe
 @router.post("/model-deployments/{deployment_id}/probe")
 def probe_deployment(deployment_id: str, session: Session = Depends(get_session)) -> dict:
     row = deployment_or_404(session, deployment_id)
+    active_provider = provider_or_404(session, row.provider_id)
+    if not active_provider.enabled or active_provider.status != "active":
+        raise HTTPException(409, "模型平台已停用，请先启用平台")
     if provider_or_404(session, row.provider_id).adapter_type == "fal-video":
         from .video_settings import resolve_deployment
         from .fal_video import VideoProviderError
@@ -274,6 +331,7 @@ def probe_deployment(deployment_id: str, session: Session = Depends(get_session)
         raise HTTPException(status_code=409, detail="Credential is not active")
     provider_row = provider_or_404(session, row.provider_id)
     _check_cooldown(session, credential_row.id)
+    configuration_version = (row.row_version, provider_row.row_version)
     try:
         completion = _probe_deployment(provider_row, credential_row, row)
     except OpenAICompatibleError as error:
@@ -281,6 +339,10 @@ def probe_deployment(deployment_id: str, session: Session = Depends(get_session)
         row.status = "error"
         session.commit()
         raise HTTPException(status_code=502, detail=str(error)) from error
+    session.refresh(row)
+    session.refresh(provider_row)
+    if configuration_version != (row.row_version, provider_row.row_version):
+        raise HTTPException(409, "探测期间配置已修改，请按最新配置重新探测")
     row.status = "ready"
     session.commit()
     return {

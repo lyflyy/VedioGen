@@ -15,6 +15,9 @@ def test_context_exposes_limits_without_credentials_or_service_url(client):
         context = gateway._media_execution_context(session, session.get(ProjectRow, project_id))
     assert context["inputMode"] == "text-only"
     assert context["assetPreparationOwner"] == "platform"
+    assert context["imageGeneration"]["implemented"] is False
+    assert "vehicle-only" in context["imageGeneration"]["limitation"]
+    assert "people" in context["imageToVideo"]["referenceRequirements"]
     assert context["imageToVideo"]["durationOptionsMs"] is None
     assert context["imageToVideo"]["durationRangeMs"] == {"min": 500, "max": 5000}
     assert context["imageToVideo"]["enabled"] is False

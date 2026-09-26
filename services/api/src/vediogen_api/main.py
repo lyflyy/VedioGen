@@ -13,6 +13,7 @@ from .video_settings import router as video_settings_router
 from .admin import secret_store
 from .config import get_settings
 from .creator import router as creator_router
+from .reference_cut import router as reference_cut_router
 from .database import Base, SessionLocal, engine, ensure_runtime_schema
 from .models import ModelCredentialRow, ModelDeploymentRow, ModelProviderRow, RoutingDraftRow, RoutingVersionRow
 
@@ -106,6 +107,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(creator_router, prefix="/api/v1")
+app.include_router(reference_cut_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
 app.include_router(asset_discovery.router, prefix="/api/v1")
 app.include_router(asset_preparation_router, prefix="/api/v1")

@@ -4,6 +4,20 @@
 
 ## 当前状态
 
+- 2026-09-14 用户拒绝无人物的参考图展示版：原片目标是成年中国女车主与杜卡迪 V4 的 30 秒广告叙事。修复新 Brief 固定 12 秒、必留内容截断，明确人物场景首帧缺口；原片未验收，不以播放成功代替内容完成。[偏差、修正与逐镜验收](discussions/2026-09-14-brief-fidelity-rejection.md)。
+
+- 2026-09-14 修复其他镜头缺素材时连可用试片也不启动的调度问题；新增显式确认、保留原稿的参考图展示版。浏览器真实生成 6 秒 1080p 竖屏 MP4，中文旁白/配乐、播放与下载通过。原片第一镜本地 Wan 试片存在重复车辆，未采用；原脚本仍缺场景首帧与准确三维资产。[实测产物与原片缺口](discussions/2026-09-14-generation-blockers-and-reference-cut.md) · [执行契约](specs/reference-display-cut.md)。
+
+- 2026-09-13 修复自动准备素材无反馈：官网检索回退网络检索、单镜头准备、真实阶段日志及失败刷新恢复。原杜卡迪项目实际下载 5 张候选，经 GPT 检查为第 6 镜头绑定参考图；仍缺独立微距素材，未宣称整片就绪。[真实记录与缺口](discussions/2026-09-13-material-preparation-feedback.md) · [执行契约](specs/material-task-feedback.md)。
+
+- 2026-09-13 修复 GPT-5.5 脚本长调用：原 120 秒本地超时，增至 300 秒后确认非流式请求又遭遇 Cloudflare 524。改用流式接收后，原项目真实生成 6 镜头 / 12 秒脚本，131.4 秒完成并通过页面回显、导出；素材仍待准备。[排查与真实产物](discussions/2026-09-13-gpt55-script-timeout.md) · [流式接收契约](specs/storyboard-streaming.md)。
+
+- 2026-09-13 策略页已用真实调用进度替换固定等待文案，支持等待计时、展开日志、失败时调整要求、草稿保留与重复反馈防护。251 项 API / 7 项相关浏览器验收通过；本轮未新增真实模型调用。[实施与验证](discussions/2026-09-13-strategy-execution-visibility.md) · [执行契约](specs/strategy-execution-visibility.md)。
+
+- 2026-09-12 排查 GetTokens 历史 502，修复 HTML/非标准错误响应采集并加入接口与网关诊断。真实原项目重试得到上游账号池限流 429，日志已展示原文及 Request ID；未宣称生成恢复，历史 502 根因仍不能确认。[实测证据与剩余依赖](discussions/2026-09-12-gettokens-502-diagnosis.md)。
+
+- 2026-09-12 平台、API Key 和模型已支持界面新增/编辑、参数回显、按平台选择凭据；连接变更需重新探测，保留既有路由引用。242 项 API 回归与 2 项管理端浏览器验收通过，未改动真实凭据或重试上游。[实现与验证](discussions/2026-09-12-model-configuration.md) · [配置契约](specs/model-configuration-editing.md)。
+
 - 2026-09-12 项目筛选/搜索/分页、可恢复回收站、项目执行日志及上游错误详情已实现。真实复现 GetTokens `gpt-5.4-mini` 的 429：上游报告所有可用账号受限，页面可查看脱敏原文及请求 ID，不推断为余额不足。[实测记录](discussions/2026-09-12-project-management-and-errors.md) · [功能契约](specs/project-management-and-activity.md)。
 
 - 2026-09-12 混合路线基础能力已实现，浏览器复用历史真实 GPT 脚本与官网参考，完成 11 秒竖屏展示片、本地配乐、播放及下载；新文字 GPT 入口仍遭遇 429/502，本地动态试片因伪影拒绝采用。未宣布准确环绕、驾驶或 80 分验收完成。[实施与真实产物](discussions/2026-09-12-quality-route-implementation.md) · [执行契约](specs/quality-route-execution.md) · [长期目标](plans/2026-09-11-quality-route-execution.md)。

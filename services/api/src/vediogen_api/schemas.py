@@ -1,6 +1,7 @@
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def to_camel(value: str) -> str:
@@ -82,11 +83,22 @@ class RetryShotRequest(ApiModel):
 
 class ProviderInput(ApiModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,63}$")
-    display_name: str
-    adapter_type: str
-    base_url: str
-    region: str = "global"
+    display_name: str = Field(min_length=1, max_length=100)
+    adapter_type: Literal["openai-compatible", "fal-video", "fake"]
+    base_url: str = Field(min_length=1, max_length=500)
+    region: str = Field(default="global", min_length=1, max_length=50)
     enabled: bool = True
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value):
+        value = value.strip().rstrip("/")
+        url = urlsplit(value)
+        if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password or url.query or url.fragment:
+            raise ValueError("请求地址需为不含密钥、查询参数的 HTTP(S) Base URL")
+        if value.endswith(("/chat/completions", "/responses", "/models")):
+            raise ValueError("请填写请求基址，不包含 /chat/completions、/responses 或 /models")
+        return value
 
 
 class CredentialInput(ApiModel):
@@ -96,11 +108,11 @@ class CredentialInput(ApiModel):
 
 
 class DeploymentInput(ApiModel):
-    display_name: str
+    display_name: str = Field(min_length=1, max_length=100)
     provider_id: str
-    physical_model_id: str
+    physical_model_id: str = Field(min_length=1, max_length=200)
     credential_id: str
-    capabilities: list[str]
+    capabilities: list[str] = Field(min_length=1, max_length=30)
     timeout_seconds: int = Field(default=60, ge=1, le=600)
     max_context_tokens: int | None = Field(default=None, ge=1)
 

@@ -20,6 +20,13 @@ def create(client, message="春风 800MT，先环绕，再沙漠，最后山林�
     return client.post("/api/v1/projects", json={"title": "最酷视频", "initialMessage": message}).json()["id"]
 
 
+def test_ducati_alias_does_not_match_other_brands_or_explicit_families():
+    assert asset_discovery.matches_subject("杜卡迪 V4", "Ducati Panigale V4 motorcycle")
+    assert not asset_discovery.matches_subject("杜卡迪 V4", "Aprilia RSV4")
+    assert not asset_discovery.matches_subject("杜卡迪 V4", "Ducati Panigale V4R")
+    assert not asset_discovery.matches_subject("杜卡迪 Panigale V4", "Ducati Multistrada V4")
+
+
 def wait_discovery(client, project_id):
     for _ in range(300):
         run = client.get(f"/api/v1/projects/{project_id}/asset-discoveries/latest").json()["run"]

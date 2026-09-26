@@ -87,7 +87,7 @@ export interface Brief {
   pacing: string;
   emotionalPeak: string;
   cta: string;
-  targetDurationMs: number;
+  targetDurationMs: number | null;
   resourceEstimate: string;
 }
 
@@ -139,7 +139,7 @@ export interface GenerationRun {
   id: string;
   status: string;
   storyboardVersionId: string;
-    shotRuns: Array<{ id: string; shotId: string; attempt: number; strategy: string; status: string; purpose?: string; artifactId?: string | null; errorMessage?: string | null; providerRequestId?: string; providerStatus?: string; renderedFrames?: number; totalFrames?: number }>;
+    shotRuns: Array<{ id: string; shotId: string; attempt: number; strategy: string; status: string; purpose?: string; artifactId?: string | null; errorMessage?: string | null; providerRequestId?: string; providerStatus?: string; elapsedSeconds?: number; renderedFrames?: number; totalFrames?: number }>;
   finalArtifactId: string | null;
   costCny: string | null;
   errorMessage: string | null;
@@ -180,6 +180,8 @@ export interface Credential {
 }
 
 export interface Deployment {
+  timeoutSeconds: number;
+  maxContextTokens: number | null;
   cooldown?: Credential["cooldown"];
   id: string;
   displayName: string;

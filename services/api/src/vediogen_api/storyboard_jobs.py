@@ -3,15 +3,18 @@
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import hashlib
+from io import BytesIO
 from pathlib import Path
 from threading import RLock
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
+from .asset_discovery import search_images
 from .database import SessionLocal, get_session
 from .fixtures import timestamp
 from .gateway import generate_storyboard, extract_asset_brief, match_storyboard_assets, ModelGatewayError
@@ -68,36 +71,63 @@ def update(run_id, phase=None, **fields):
         row = session.get(DocumentRow, run_id)
         events = row.data.get("events", [])
         if phase:
-            events = [*events, {"phase": phase, "at": timestamp()}]
+            events = [*events, {"phase": phase, "at": timestamp(), **({"message": fields["message"]} if fields.get("message") else {})}]
         row.data = {**row.data, **fields, "phase": phase or row.data["phase"], "events": events}
         row.status = fields.get("status", "running")
         session.commit()
 
 
-def prepare_images(session, project):
+def prepare_images(session, project, progress=None):
+    report = progress or (lambda *args, **kwargs: None)
     if not get_settings().allow_external_search:
         return [] if project.asset_versions else ["当前环境未启用素材检索，保留待准备镜头"]
+    report("identifying-subject", message="正在根据项目描述确认检索主体")
     brief = extract_asset_brief(session, project, project.messages)
     session.commit()
     if not brief["subject"] or brief.get("clarification"):
         return [brief.get("clarification") or "主体尚未明确，未自动采用其他车型"]
-    candidates, warnings = manufacturer_images(brief["subject"])
+    report("searching-manufacturer", message=f"正在检索 {brief['subject']} 的官网参考图")
+    reference_source = "manufacturer"
+    try:
+        candidates, warnings = manufacturer_images(brief["subject"])
+    except PublicMediaError as error:
+        candidates, warnings = [], [str(error)]
+    if not candidates:
+        report("searching-web", message=f"官网无可用结果，正在检索 {brief['subject']} 的网络参考图")
+        candidates, web_warnings = search_images(brief["subject"])
+        warnings = [*warnings, *web_warnings]
+        reference_source = "web"
+        candidates = [{**c, "modelName": brief["subject"], "context": c["title"], "referenceIndex": i}
+                      for i, c in enumerate(candidates[:4], 1)]
     exact = [c for c in candidates if not c.get("requiresVariantConfirmation")]
     if not exact:
-        return [*warnings, "未找到精确车型的官网图片，请在资料页确认候选版本"]
+        return [*warnings, "未找到可自动采用的车型图片；可调整车型描述或在资料页确认候选版本"]
     # Sample colorway groups before matching; the first gallery need not match the requested color.
     groups = list(dict.fromkeys(c.get("context", "").split(" / 视角", 1)[0] for c in exact if "细节" not in c.get("context", "")))[:3]
     chosen = [c for group in groups for c in [c for c in exact if c.get("context", "").split(" / 视角", 1)[0] == group][:2]]
     if not chosen:
         chosen = exact[:3]
     chosen += [c for c in exact if "细节" in c.get("context", "") and c not in chosen][:2]
-    warnings = [*warnings, "已准备官网候选，配色和视角将在镜头匹配时检查；尚未由用户确认"]
-    for candidate in chosen:
+    warnings = [*warnings, "已检索到候选图片，主体、配色和视角将在镜头匹配时检查；尚未由用户确认"]
+    for index, candidate in enumerate(chosen, 1):
         if any(a.get("sourceImageUrl") == candidate["imageUrl"] and a.get("status") == "ready"
                and Path(a.get("uri", "")).is_file() for a in project.asset_versions):
             continue
-        content = fetch_public_image(candidate["imageUrl"])
-        suffix, mime = (".png", "image/png") if content.startswith(b"\x89PNG\r\n\x1a\n") else (".jpg", "image/jpeg")
+        report("downloading-assets", message=f"正在下载参考图 {index}/{len(chosen)}：{candidate['modelName']}")
+        try:
+            content = fetch_public_image(candidate["imageUrl"])
+        except PublicMediaError as error:
+            warnings.append(f"参考图 {index} 下载失败：{error}")
+            continue
+        try:
+            with Image.open(BytesIO(content)) as picture:
+                image_format = picture.format
+                picture.verify()
+            suffix, mime = {"PNG": (".png", "image/png"), "JPEG": (".jpg", "image/jpeg"),
+                            "WEBP": (".webp", "image/webp"), "GIF": (".gif", "image/gif")}[image_format]
+        except (UnidentifiedImageError, OSError, ValueError, KeyError, Image.DecompressionBombError):
+            warnings.append(f"参考图 {index} 格式不受支持或文件已损坏，已跳过")
+            continue
         asset_id = str(uuid4())
         target = get_settings().data_dir / "assets" / project.id / (asset_id + suffix)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -105,9 +135,9 @@ def prepare_images(session, project):
             target.write_bytes(content)
             info = probe_media(target)
             if not info.get("width") or not info.get("height"):
-                raise PublicMediaError("官网素材无法解码")
+                raise PublicMediaError("参考素材无法解码")
             asset = {"id": asset_id, "assetId": str(uuid4()), "version": 1, "kind": "image",
-                "status": "ready", "sourceType": "web-reference", "referenceSource": "manufacturer",
+                "status": "ready", "sourceType": "web-reference", "referenceSource": reference_source,
                 "preparedBy": "platform", "subjectConfirmedByUser": False,
                 "subject": candidate["modelName"], "referenceContext": candidate.get("context", ""),
                 "sourceUrl": candidate["sourceUrl"], "sourceImageUrl": candidate["imageUrl"],
@@ -119,13 +149,18 @@ def prepare_images(session, project):
             project.asset_versions = [*project.asset_versions, asset]
             project.row_version += 1
             session.commit()
+        except (PublicMediaError, MediaGenerationError) as error:
+            target.unlink(missing_ok=True)
+            warnings.append(f"参考图 {index} 无法使用：{error}")
         except Exception:
             target.unlink(missing_ok=True)
             raise
+        else:
+            report("downloading-assets", message=f"参考图 {index}/{len(chosen)} 已导入素材库")
     return warnings
 
 
-def assign_assets(session, project, data):
+def assign_assets(session, project, data, progress=None):
     shots = deepcopy(data["shots"])
     assets = {a["id"]: a for a in project.asset_versions if a.get("status") == "ready" and Path(a.get("uri", "")).is_file()}
     images = [a for a in assets.values() if a.get("kind") == "image"]
@@ -152,7 +187,8 @@ def assign_assets(session, project, data):
         and (s.get("requiresPlanning") or not (s.get("productionPlan") or {}).get("referenceChecked")
              or (s.get("productionPlan") or {}).get("blocker"))]
     if images and pending:
-        choices = match_storyboard_assets(session, project, pending, images)
+        choices = (match_storyboard_assets(session, project, pending, images, progress) if progress
+                   else match_storyboard_assets(session, project, pending, images))
         if not data.get("soundPlanConfirmed") and choices.get("soundPlan"):
             sound_plan = choices["soundPlan"]
         allowed = {a["id"] for a in images}
@@ -241,6 +277,11 @@ def get_latest(project_id: str, session: Session = Depends(get_session)):
 
 @router.post("/projects/{project_id}/storyboards/{storyboard_id}/auto-materials")
 def auto_materials(project_id: str, storyboard_id: str, session: Session = Depends(get_session)):
+    return prepare_materials(project_id, storyboard_id, session)
+
+
+def prepare_materials(project_id, storyboard_id, session, shot_id=None, progress=None):
+    report = progress or (lambda *args, **kwargs: None)
     with generation_lock:
         project = session.get(ProjectRow, project_id)
         row = session.get(DocumentRow, storyboard_id)
@@ -251,12 +292,36 @@ def auto_materials(project_id: str, storyboard_id: str, session: Session = Depen
             raise HTTPException(409, "生成期间暂不能修改分镜")
         original_version = row.row_version
         original_data = deepcopy(row.data)
+        selected = [s for s in original_data["shots"] if not shot_id or s["id"] == shot_id]
+        if not selected:
+            raise HTTPException(404, "镜头不存在")
     try:
         available = {a["id"] for a in project.asset_versions if a.get("status") == "ready" and Path(a.get("uri", "")).is_file()}
-        missing = any(s.get("sourceAssetId") not in available or s.get("requiresPlanning")
-            or (s.get("selectionOwner") == "platform" and not (s.get("productionPlan") or {}).get("referenceChecked")) for s in original_data["shots"])
-        warnings = prepare_images(session, project) if missing else original_data.get("materialWarnings", [])
-        data = assign_assets(session, project, original_data)
+        missing = any(s.get("sourceStrategy") in {"image-motion", "image-to-video", "user-video"} and (
+            s.get("sourceAssetId") not in available or s.get("requiresPlanning")
+            or (s.get("selectionOwner") == "platform" and not (s.get("productionPlan") or {}).get("referenceChecked"))) for s in selected)
+        warnings = original_data.get("materialWarnings", [])
+        if missing:
+            try:
+                warnings = prepare_images(session, project, progress) if progress else prepare_images(session, project)
+            except (PublicMediaError, MediaGenerationError) as error:
+                warnings = [str(error)]
+        session.commit()
+        report("matching-assets", message="正在检查参考图与镜头要求，匹配主体、配色和视角", warnings=warnings)
+        selected_data = {**original_data, "shots": selected}
+        data = (assign_assets(session, project, selected_data, progress) if progress
+                else assign_assets(session, project, selected_data))
+        if shot_id:
+            replacements = {s["id"]: s for s in data["shots"]}
+            data["shots"] = [replacements.get(s["id"], s) for s in original_data["shots"]]
+            # A single-shot repair must not change the shared sound plan.
+            for key in ("soundPlan", "soundPlanConfirmed"):
+                if key in original_data:
+                    data[key] = original_data[key]
+                else:
+                    data.pop(key, None)
+            orders = {s["id"]: i for i, s in enumerate(original_data["shots"], 1)}
+            data["materialChanges"] = [{**c, "order": orders[c["shotId"]]} for c in data.get("materialChanges", [])]
         session.commit()
     except (PublicMediaError, MediaGenerationError, ModelGatewayError) as error:
         raise HTTPException(422, str(error)) from error
@@ -278,15 +343,21 @@ def auto_materials(project_id: str, storyboard_id: str, session: Session = Depen
 
 @router.post("/projects/{project_id}/storyboards/{storyboard_id}/material-runs", status_code=202)
 def enqueue_materials(project_id: str, storyboard_id: str, generate: bool = False,
-                      session: Session = Depends(get_session)):
+                      session: Session = Depends(get_session), shot_id: str | None = None):
     with lock, generation_lock:
         project = session.get(ProjectRow, project_id)
         board = session.get(DocumentRow, storyboard_id)
         if not project or project.status == "deleted" or not board or board.kind != "storyboard" or board.project_id != project_id:
             raise HTTPException(404, "分镜不存在")
+        if shot_id and not any(s["id"] == shot_id for s in board.data["shots"]):
+            raise HTTPException(404, "镜头不存在")
+        if shot_id and generate:
+            raise HTTPException(422, "单镜头准备后请使用镜头试片；整片生成请使用全部素材准备")
         previous = latest_materials(session, project_id)
         if previous and previous.status in ("queued", "running"):
-            return serialize(previous)
+            if previous.data["storyboardVersionId"] == storyboard_id and previous.data.get("shotId") == shot_id and previous.data.get("generate") == generate:
+                return serialize(previous)
+            raise HTTPException(409, "已有素材准备任务正在执行，请等待当前任务完成")
         if session.scalar(select(GenerationRunRow.id).where(GenerationRunRow.project_id == project_id, GenerationRunRow.status.in_(ACTIVE))):
             raise HTTPException(409, "视频正在生成，请在生成页查看进度")
         if not executor:
@@ -295,7 +366,7 @@ def enqueue_materials(project_id: str, storyboard_id: str, generate: bool = Fals
             raise HTTPException(422, "云端视频需先准备素材，再到生成页确认费用")
         run = DocumentRow(id=str(uuid4()), project_id=project_id, kind="material-run", version=1,
             status="queued", data={"phase": "queued", "createdAt": timestamp(), "events": [],
-            "storyboardVersionId": board.id, "inputVersion": board.row_version, "generate": generate,
+            "storyboardVersionId": board.id, "inputVersion": board.row_version, "generate": generate, "shotId": shot_id,
             "errorMessage": None, "changes": [], "checks": [], "generationRunId": None})
         session.add(run)
         session.commit()
@@ -325,16 +396,22 @@ def execute_materials(run_id):
             if board.row_version != run.data["inputVersion"]:
                 raise ValueError("分镜已修改，请重新准备最新分镜")
             project_id, board_id = run.project_id, board.id
-            auto_materials(project_id, board_id, session)
+            prepare_materials(project_id, board_id, session, run.data.get("shotId"),
+                              lambda phase, **fields: update(run_id, phase, **fields))
             prepared_version = board.row_version
             update(run_id, "checking-shots", resultVersion=prepared_version,
                 changes=board.data.get("materialChanges", []), warnings=board.data.get("materialWarnings", []))
             checks = shot_readiness(project_id, board_id, session)
+            if run.data.get("shotId"):
+                checks["shots"] = [c for c in checks["shots"] if c["shotId"] == run.data["shotId"]]
+                checks["ready"] = all(c["ready"] for c in checks["shots"])
             generation_id = None
-            if run.data["generate"] and all(c.get("technicalReady") for c in checks["shots"]) and not checks["ready"]:
+            previewable = {c["shotId"] for c in checks["shots"] if c.get("technicalReady") and not c["ready"]}
+            critical = next((s for s in board.data["shots"] if s["id"] in previewable
+                             and (s.get("productionPlan") or {}).get("needsPreview") and not s.get("previewRunId")), None)
+            if run.data["generate"] and critical:
                 from .creator import create_generation, get_shot_preview
                 from .schemas import GenerationRequest
-                critical = next(s for s in board.data["shots"] if (s.get("productionPlan") or {}).get("needsPreview") and not s.get("previewRunId"))
                 with generation_lock:
                     session.refresh(board)
                     if board.row_version != prepared_version:
@@ -364,7 +441,7 @@ def execute_materials(run_id):
                 generationRunId=generation_id, completedAt=timestamp())
     except Exception as error:
         message = str(error.detail) if isinstance(error, HTTPException) else str(error) if isinstance(error, (ValueError, ModelGatewayError, MediaGenerationError)) else "素材准备失败，请重试"
-        update(run_id, "failed", status="failed", errorMessage=message)
+        update(run_id, "failed", status="failed", errorMessage=message, completedAt=timestamp())
 
 
 @router.get("/projects/{project_id}/storyboards/{storyboard_id}/readiness")
@@ -392,7 +469,8 @@ def start_worker():
         for row in session.scalars(select(DocumentRow).where(DocumentRow.kind.in_(("storyboard-run", "material-run")),
                 DocumentRow.status.in_(("queued", "running")))):
             row.status = "interrupted"
-            row.data = {**row.data, "errorMessage": "服务曾中断，请手动重试；未自动重复调用模型"}
+            row.data = {**row.data, "phase": "interrupted", "completedAt": timestamp(),
+                        "errorMessage": "服务曾中断，请手动重试；未自动重复调用模型"}
         session.commit()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="script-preparation")
 

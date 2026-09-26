@@ -104,6 +104,7 @@ export function ShotPreview({ projectId, storyboardId, shotId, disabled, save, o
     </div>
     {error || run?.errorMessage ? <p role="alert">{error || run?.errorMessage}</p> : null}
     {active && latest?.totalFrames ? <p role="status">已渲染 {latest.renderedFrames ?? 0} / {latest.totalFrames} 帧</p> : null}
+    {active && run?.mode === "local-ai-video" ? <p role="status">本地视频模型{latest?.providerStatus === "QUEUED" ? "排队中" : "正在生成"}{typeof latest?.elapsedSeconds === "number" ? `，已用时 ${Math.floor(latest.elapsedSeconds / 60)} 分 ${latest.elapsedSeconds % 60} 秒` : ""}</p> : null}
     {latest?.artifactId && latest.status === "succeeded" ? <video key={latest.artifactId} src={`/api/v1/artifacts/${latest.artifactId}/content`} controls playsInline preload="metadata" aria-label="镜头试片视频" /> : null}
     {run ? <div className="shot-preview-actions">
       {active ? <Button variant="secondary" size="compact" disabled={busy} onClick={() => void perform("cancel")}><Square size={15} />停止试片</Button> : null}

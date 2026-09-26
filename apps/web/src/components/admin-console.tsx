@@ -9,8 +9,10 @@ import {
   LoaderCircle,
   Network,
   Plus,
+  Pencil,
   RefreshCw,
   Rocket,
+  Save,
   ServerCog,
   Waypoints,
 } from "lucide-react";
@@ -24,6 +26,8 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Status } from "@/components/ui/status";
+import { Tooltip } from "@/components/ui/tooltip";
+import Link from "next/link";
 import { api, post } from "@/lib/api";
 import type {
   Credential,
@@ -256,6 +260,8 @@ function ProvidersPanel() {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [editing, setEditing] = useState<Provider | null>(null);
+  const [message, setMessage] = useState("");
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
@@ -263,16 +269,21 @@ function ProvidersPanel() {
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     try {
-      await post("/admin/model-providers", {
-        id: form.get("id"),
+      const payload = {
+        ...(!editing ? { id: form.get("id") } : {}),
         displayName: form.get("displayName"),
         adapterType: form.get("adapterType"),
         baseUrl: form.get("baseUrl"),
         region: form.get("region"),
-        enabled: true,
-      });
+        enabled: form.get("enabled") === "on",
+      };
+      if (editing && (payload.baseUrl !== editing.baseUrl || payload.adapterType !== editing.adapterType) && !window.confirm("修改请求地址或适配器会影响此平台下所有模型，保存后需重新能力探测。继续？")) return;
+      if (editing) await api(`/admin/model-providers/${editing.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+      else await post("/admin/model-providers", payload);
       formElement.reset();
       setOpen(false);
+      setEditing(null);
+      setMessage("平台配置已保存");
       await resource.reload();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "平台创建失败");
@@ -285,19 +296,22 @@ function ProvidersPanel() {
       icon={ServerCog}
       title="已接入平台"
       action={
-        <Button onClick={() => setOpen((value) => !value)}>
+        <Button disabled={busy} onClick={() => { setEditing(null); setError(""); setOpen(true); }}>
           <Plus size={16} />
           添加平台
         </Button>
       }
     >
       {open ? (
-        <form className="admin-form" onSubmit={submit}>
+        <form key={editing?.id ?? "new"} className="admin-form model-config-form" onSubmit={submit}>
+          <h3 className="admin-form-wide">{editing ? `编辑平台：${editing.displayName}` : "新建平台"}</h3>
           <label>
             平台 ID
             <input
               required
               name="id"
+              defaultValue={editing?.id ?? ""}
+              disabled={Boolean(editing)}
               pattern="[a-z][a-z0-9-]*"
               placeholder="openai-compatible"
             />
@@ -307,38 +321,41 @@ function ProvidersPanel() {
             <input
               required
               name="displayName"
+              defaultValue={editing?.displayName ?? ""}
               placeholder="OpenAI Compatible"
             />
           </label>
           <label>
             适配器
-            <select name="adapterType">
+            <select name="adapterType" defaultValue={editing?.adapterType ?? "openai-compatible"}>
               <option value="openai-compatible">OpenAI Compatible</option>
               <option value="fal-video">fal 视频队列</option>
-              <option value="anthropic">Anthropic</option>
               <option value="fake">Fake Provider</option>
             </select>
           </label>
           <label>
             区域
-            <input required name="region" defaultValue="global" />
+            <input required name="region" defaultValue={editing?.region ?? "global"} />
           </label>
           <label className="admin-form-wide">
             Base URL
             <input
               required
               name="baseUrl"
+              defaultValue={editing?.baseUrl ?? ""}
               type="url"
               placeholder="https://api.example.com/v1"
             />
           </label>
-          <FormFooter busy={busy} error={error} label="创建平台" />
+          <label className="admin-checkbox"><input type="checkbox" name="enabled" defaultChecked={editing?.enabled ?? true} />启用平台</label>
+          <FormFooter busy={busy} error={error} label={editing ? "保存平台" : "创建平台"} cancelAction={<Button type="button" variant="ghost" disabled={busy} onClick={() => { setOpen(false); setEditing(null); setError(""); }}>取消</Button>} />
         </form>
       ) : null}
       <PanelState loading={resource.loading} error={resource.error} />
+      {message ? <p role="status">{message}</p> : null}
       <div className="admin-list">
         {resource.data?.items.map((item) => (
-          <article className="admin-row" key={item.id}>
+          <article className="admin-row config-row" key={item.id}>
             <span className="admin-row-icon">
               <ServerCog size={18} />
             </span>
@@ -347,12 +364,15 @@ function ProvidersPanel() {
               <span>
                 {item.adapterType} · {item.region}
               </span>
+              <small className="config-address">{item.baseUrl}</small>
             </div>
             <code>{item.id}</code>
             <Status value={item.status} />
+            <Tooltip label="编辑平台"><button className="icon-button" aria-label={`编辑平台：${item.displayName}`} disabled={busy} onClick={() => { setEditing(item); setOpen(true); setError(""); window.scrollTo({ top: 0, behavior: "smooth" }); }}><Pencil size={16} /></button></Tooltip>
           </article>
         ))}
       </div>
+      <div className="config-links"><Link href="/admin/credentials">配置 API Key</Link><Link href="/admin/deployments">配置模型</Link></div>
     </AdminPanel>
   );
 }
@@ -366,6 +386,8 @@ function CredentialsPanel() {
   );
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [editing, setEditing] = useState<Credential | null>(null);
+  const [message, setMessage] = useState("");
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy("create");
@@ -373,12 +395,18 @@ function CredentialsPanel() {
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     try {
-      await post("/admin/model-credentials", {
+      const secret = String(form.get("secret") ?? "");
+      if (editing) {
+        if (secret && !window.confirm("更换 Key 会影响引用此凭据的模型，保存后需重新能力探测。继续？")) return;
+        await api(`/admin/model-credentials/${editing.id}`, { method: "PATCH", body: JSON.stringify({ alias: form.get("alias"), ...(secret ? { secret } : {}) }) });
+      } else await post("/admin/model-credentials", {
         providerId: form.get("providerId"),
         alias: form.get("alias"),
         secret: form.get("secret"),
       });
       formElement.reset();
+      setEditing(null);
+      setMessage("凭据已加密保存，未返回 Key 原文");
       await credentials.reload();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "密钥保存失败");
@@ -411,10 +439,11 @@ function CredentialsPanel() {
   }
   return (
     <AdminPanel icon={KeyRound} title="密钥与凭据">
-      <form className="admin-form credential-form" onSubmit={submit}>
+      <form key={editing?.id ?? "new"} className="admin-form credential-form model-config-form" onSubmit={submit}>
+        <h3 className="admin-form-wide">{editing ? `编辑凭据：${editing.alias}` : "添加 API Key"}</h3>
         <label>
           模型平台
-          <select name="providerId" required>
+          <select name="providerId" required disabled={Boolean(editing)} defaultValue={editing?.providerId}>
             {providers.data?.items.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.displayName}
@@ -424,27 +453,28 @@ function CredentialsPanel() {
         </label>
         <label>
           凭据别名
-          <input name="alias" required placeholder="生产环境 Key" />
+          <input name="alias" required defaultValue={editing?.alias ?? ""} placeholder="生产环境 Key" />
         </label>
         <label className="admin-form-wide">
           API Key
           <input
             name="secret"
             type="password"
-            required
+            required={!editing}
             autoComplete="new-password"
-            placeholder="输入后只可覆盖，不可读取"
+            placeholder={editing ? "留空保留原 Key；填写则更换" : "输入后只可覆盖，不可读取"}
           />
         </label>
-        <FormFooter busy={busy === "create"} error={error} label="加密保存" />
+        <FormFooter busy={Boolean(busy)} error={error} label={editing ? "保存凭据" : "加密保存"} cancelAction={editing ? <Button type="button" variant="ghost" disabled={Boolean(busy)} onClick={() => { setEditing(null); setError(""); }}>取消编辑</Button> : null} />
       </form>
+      {message ? <p role="status">{message}</p> : null}
       <PanelState
         loading={credentials.loading || providers.loading}
         error={credentials.error || providers.error}
       />
       <div className="admin-list">
         {credentials.data?.items.map((item) => (
-          <article className="admin-row" key={item.id}>
+          <article className="admin-row config-row" key={item.id}>
             <span className="admin-row-icon">
               <KeyRound size={18} />
             </span>
@@ -456,6 +486,7 @@ function CredentialsPanel() {
               {item.cooldown ? <small role="status">{item.cooldown.message}</small> : null}
             </div>
             <Status value={item.cooldown ? "needs_attention" : item.status} />
+            <Tooltip label="编辑凭据"><button className="icon-button" aria-label={`编辑凭据：${item.alias}`} disabled={Boolean(busy)} onClick={() => { setEditing(item); setError(""); window.scrollTo({ top: 0, behavior: "smooth" }); }}><Pencil size={16} /></button></Tooltip>
             <Button
               variant="secondary"
               size="compact"
@@ -488,6 +519,11 @@ function DeploymentsPanel() {
   );
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [editing, setEditing] = useState<Deployment | null>(null);
+  const [providerId, setProviderId] = useState("");
+  const [message, setMessage] = useState("");
+  const availableKeys = credentials.data?.items.filter(item => item.providerId === providerId && item.status === "active") ?? [];
+  const selectedProvider = providers.data?.items.find(item => item.id === providerId);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy("create");
@@ -495,19 +531,20 @@ function DeploymentsPanel() {
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     try {
-      await post("/admin/model-deployments", {
+      const payload = {
         displayName: form.get("displayName"),
         providerId: form.get("providerId"),
         physicalModelId: form.get("physicalModelId"),
         credentialId: form.get("credentialId"),
-        capabilities: String(form.get("capabilities"))
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean),
-        timeoutSeconds: 120,
-        maxContextTokens: 32000,
-      });
+        capabilities: form.getAll("capabilities"),
+        timeoutSeconds: Number(form.get("timeoutSeconds")),
+        maxContextTokens: form.get("maxContextTokens") ? Number(form.get("maxContextTokens")) : null,
+      };
+      if (editing) await api(`/admin/model-deployments/${editing.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+      else await post("/admin/model-deployments", payload);
       formElement.reset();
+      setEditing(null); setProviderId("");
+      setMessage("模型配置已保存；连接参数变更后需能力探测，通过后原有路由会使用新配置。");
       await deployments.reload();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "部署创建失败");
@@ -528,15 +565,17 @@ function DeploymentsPanel() {
     }
   }
   return (
-    <AdminPanel icon={Waypoints} title="可路由部署">
-      <form className="admin-form" onSubmit={submit}>
+    <AdminPanel icon={Waypoints} title="可路由部署" action={<Button disabled={Boolean(busy)} onClick={() => { setEditing(null); setProviderId(""); setError(""); }}><Plus size={16} />添加模型</Button>}>
+      <form key={editing?.id ?? "new"} className="admin-form model-config-form" onSubmit={submit}>
+        <h3 className="admin-form-wide">{editing ? `编辑模型：${editing.displayName}` : "新建模型"}</h3>
         <label>
           部署名称
-          <input name="displayName" required placeholder="Creative Model CN" />
+          <input name="displayName" required defaultValue={editing?.displayName ?? ""} placeholder="Creative Model CN" />
         </label>
         <label>
           模型平台
-          <select name="providerId" required>
+          <select name="providerId" required value={providerId} onChange={event => setProviderId(event.target.value)}>
+            <option value="">选择模型平台</option>
             {providers.data?.items.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.displayName}
@@ -546,28 +585,28 @@ function DeploymentsPanel() {
         </label>
         <label>
           物理模型 ID
-          <input name="physicalModelId" required placeholder="model-v1" />
+          <input name="physicalModelId" required defaultValue={editing?.physicalModelId ?? ""} placeholder="gpt-5.4-mini" />
         </label>
         <label>
           调用凭据
-          <select name="credentialId" required>
-            {credentials.data?.items.map((item) => (
+          <select key={providerId} name="credentialId" required defaultValue={editing?.providerId === providerId ? editing.credentialId : ""}>
+            <option value="">选择该平台的 Key</option>
+            {availableKeys.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.alias} · {item.lastFour}
               </option>
             ))}
           </select>
         </label>
-        <label className="admin-form-wide">
-          能力标签
-          <input
-            name="capabilities"
-            required
-            defaultValue="text,image-input,structured-output,zh-CN"
-          />
-        </label>
-        <FormFooter busy={busy === "create"} error={error} label="创建部署" />
+        {selectedProvider ? <p className="admin-form-wide config-address">请求基址：{selectedProvider.baseUrl} · <Link href="/admin/model-providers">编辑平台地址</Link></p> : null}
+        {providerId && !availableKeys.length ? <p role="status" className="admin-form-wide">该平台暂无有效 Key。<Link href="/admin/credentials">添加 API Key</Link></p> : null}
+        <label>超时（秒）<input name="timeoutSeconds" type="number" min="1" max="600" required defaultValue={editing?.timeoutSeconds ?? 120} /></label>
+        <label>上下文上限（Token）<input name="maxContextTokens" type="number" min="1" defaultValue={editing?.maxContextTokens ?? ""} /></label>
+        <fieldset className="admin-form-wide capability-options"><legend>能力标签</legend>{Array.from(new Set(["text", "image-input", "structured-output", "zh-CN", "image-to-video", ...(editing?.capabilities ?? [])])).map(value => <label key={value}><input type="checkbox" name="capabilities" value={value} defaultChecked={(editing?.capabilities ?? ["text", "image-input", "structured-output", "zh-CN"]).includes(value)} />{{ text: "文本", "image-input": "图片理解", "structured-output": "结构化输出", "zh-CN": "中文", "image-to-video": "图生视频" }[value] ?? value}</label>)}</fieldset>
+        <FormFooter busy={Boolean(busy)} error={error} label={editing ? "保存模型" : "创建部署"} cancelAction={editing ? <Button type="button" variant="ghost" disabled={Boolean(busy)} onClick={() => { setEditing(null); setProviderId(""); setError(""); }}>取消编辑</Button> : null} />
       </form>
+      {message ? <p role="status">{message}</p> : null}
+      <div className="config-links"><Link href="/admin/credentials">管理 API Key</Link><Link href="/admin/routing">选择默认模型与路由</Link></div>
       <PanelState
         loading={
           deployments.loading || providers.loading || credentials.loading
@@ -576,7 +615,7 @@ function DeploymentsPanel() {
       />
       <div className="admin-list">
         {deployments.data?.items.map((item) => (
-          <article className="admin-row deployment-row" key={item.id}>
+          <article className="admin-row deployment-row config-row" key={item.id}>
             <span className="admin-row-icon">
               <Waypoints size={18} />
             </span>
@@ -589,6 +628,7 @@ function DeploymentsPanel() {
               {item.cooldown ? <small role="status">{item.cooldown.message}</small> : null}
             </div>
             <Status value={item.cooldown ? "needs_attention" : item.status} />
+            <Tooltip label="编辑模型"><button className="icon-button" aria-label={`编辑模型：${item.displayName}`} disabled={Boolean(busy)} onClick={() => { setEditing(item); setProviderId(item.providerId); setError(""); window.scrollTo({ top: 0, behavior: "smooth" }); }}><Pencil size={16} /></button></Tooltip>
             <Button
               variant="secondary"
               size="compact"
@@ -972,10 +1012,12 @@ function FormFooter({
   busy,
   error,
   label,
+  cancelAction,
 }: {
   busy: boolean;
   error: string;
   label: string;
+  cancelAction?: ReactNode;
 }) {
   return (
     <div className="admin-form-footer">
@@ -986,9 +1028,12 @@ function FormFooter({
       ) : (
         <span>必填字段会在提交前校验</span>
       )}
+      {cancelAction}
       <Button disabled={busy}>
         {busy ? (
           <LoaderCircle className="spin" size={16} />
+        ) : label.includes("保存") ? (
+          <Save size={16} />
         ) : (
           <Plus size={16} />
         )}

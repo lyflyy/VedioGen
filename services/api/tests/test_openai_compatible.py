@@ -110,3 +110,121 @@ def test_quota_exhaustion_does_not_promise_time_based_recovery(code):
         openai_compatible._raise_for_status(httpx.Response(429, json={"error": {"code": code}}))
     assert caught.value.code == "QUOTA_EXCEEDED"
     assert caught.value.retry_after_seconds is None
+
+
+def test_html_502_preserves_gateway_diagnostics_without_echoing_private_data():
+    request = httpx.Request('POST', 'https://relay.test/v1/chat/completions?key=private-query',
+        headers={'Authorization': 'Bearer private-key'},
+        json={'messages': [{'role': 'user', 'content': 'private customer prompt'}]})
+    response = httpx.Response(502, request=request,
+        headers={'content-type': 'text/html', 'server': 'cloudflare', 'cf-ray': 'ray-test', 'x-request-id': 'req-502', 'set-cookie': 'private-cookie'},
+        text='<html><head><title>502 Bad Gateway</title><style>private-style</style></head>'
+             '<body>Upstream connection reset. private-key private customer prompt'
+             '<script>private-script</script><img src="data:image/png;base64,cHJpdmF0ZQ=="></body></html>')
+    with pytest.raises(OpenAICompatibleError) as caught:
+        openai_compatible._raise_for_status(response)
+    message = str(caught.value)
+    assert '502 Bad Gateway' in message and 'Upstream connection reset' in message
+    assert 'POST https://relay.test/v1/chat/completions' in message
+    assert 'cf-ray：ray-test' in message and '响应体字节数' in message
+    assert caught.value.request_id == 'req-502'
+    assert not any(secret in message for secret in ['private-query', 'private-key', 'private customer prompt', 'private-style', 'private-script', 'private-cookie', 'cHJpdmF0ZQ=='])
+
+
+@pytest.mark.parametrize('content_type,body,expected', [
+    ('text/plain', 'upstream reset', 'upstream reset'),
+    ('', 'Bad Gateway', 'Bad Gateway'),
+    ('application/json', '{"detail":"upstream timeout"}', 'upstream timeout'),
+    ('application/json', '"service unavailable"', 'service unavailable'),
+    ('application/json', '{"private":"not-whitelisted"}', '响应体未包含可展示的错误字段'),
+    ('text/html', '', '空响应体'),
+])
+def test_nonstandard_gateway_error_body_is_not_silently_dropped(content_type, body, expected):
+    response = httpx.Response(502, headers={'content-type': content_type}, text=body)
+    with pytest.raises(OpenAICompatibleError) as caught:
+        openai_compatible._raise_for_status(response)
+    assert expected in str(caught.value)
+    assert '响应诊断' in str(caught.value)
+    assert 'not-whitelisted' not in str(caught.value)
+
+
+def test_html_error_text_is_bounded_and_redacts_embedded_data():
+    response = httpx.Response(502, headers={'content-type': 'text/html'},
+        text='<p>data:image/png;base64,cHJpdmF0ZQ== ' + 'A' * 10000 + '</p>')
+    with pytest.raises(OpenAICompatibleError) as caught:
+        openai_compatible._raise_for_status(response)
+    assert len(str(caught.value)) < 1600
+    assert 'cHJpdmF0ZQ==' not in str(caught.value)
+
+
+@pytest.mark.parametrize('error_type,stage,limit', [
+    (httpx.ReadTimeout, '等待响应数据', 300),
+    (httpx.ConnectTimeout, '建立连接', 20),
+    (httpx.WriteTimeout, '发送请求数据', 60),
+    (httpx.PoolTimeout, '等待连接池', 20),
+])
+def test_timeout_diagnostics_identify_stage_without_retry_or_secret_leak(monkeypatch, error_type, stage, limit):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        assert request.extensions['timeout'] == {'connect': 20, 'read': 300, 'write': 60, 'pool': 20}
+        raise error_type('private-provider-detail api-key-private', request=request)
+    install_transport(monkeypatch, handler)
+    with pytest.raises(OpenAICompatibleError) as caught:
+        complete_json(base_url='https://relay.test/v1', api_key='api-key-private', model_id='gpt-test',
+            schema_name='test', schema={'type': 'object'}, system_prompt='private-system', user_prompt='private-user', timeout_seconds=300)
+    assert caught.value.code == 'TIMEOUT'
+    assert f'{stage}超过 {limit} 秒' in str(caught.value)
+    assert error_type.__name__ in str(caught.value)
+    assert 'POST https://relay.test/v1/chat/completions' in str(caught.value)
+    assert 'private' not in str(caught.value)
+    assert len(calls) == 1
+
+
+def stream_completion(monkeypatch, chunks, done=True):
+    def handler(request):
+        body = json.loads(request.content)
+        assert body['stream'] is True and body['stream_options']['include_usage'] is True
+        assert body['response_format']['json_schema']['strict'] is True
+        text = ': heartbeat\n\n' + ''.join('data: ' + json.dumps(chunk) + '\n\n' for chunk in chunks)
+        if done:
+            text += 'data: [DONE]\n\n'
+        return httpx.Response(200, headers={'content-type': 'text/event-stream', 'x-request-id': 'stream-request'}, text=text)
+    install_transport(monkeypatch, handler)
+    return complete_json(base_url='https://relay.test/v1', api_key='private-key', model_id='gpt-test',
+        schema_name='test', schema={'type': 'object'}, system_prompt='private-system', user_prompt='private-user', stream=True)
+
+
+def test_streaming_assembles_only_answer_and_records_usage(monkeypatch):
+    result = stream_completion(monkeypatch, [
+        {'id': 'completion-stream', 'model': 'gpt-actual', 'choices': [{'index': 0, 'delta': {'reasoning_content': 'do not expose thoughts'}}]},
+        {'choices': [{'index': 0, 'delta': {'content': '{"answer":'}}]},
+        {'choices': [{'index': 0, 'delta': {'content': '"ok"}'}, 'finish_reason': 'stop'}]},
+        {'choices': [], 'usage': {'prompt_tokens': 12, 'completion_tokens': 20}},
+    ])
+    assert result.value == {'answer': 'ok'}
+    assert result.model_id == 'gpt-actual' and result.request_id == 'stream-request'
+    assert (result.input_tokens, result.output_tokens) == (12, 20)
+
+
+@pytest.mark.parametrize('reason,done', [('stop', False), ('length', True), (None, True)])
+def test_streaming_never_accepts_partial_or_truncated_script(monkeypatch, reason, done):
+    with pytest.raises(OpenAICompatibleError) as caught:
+        stream_completion(monkeypatch, [{'choices': [{'delta': {'content': '{"ok":true}'}, 'finish_reason': reason}]}], done)
+    assert caught.value.code == 'SCHEMA_INVALID'
+    assert caught.value.request_id == 'stream-request'
+
+
+def test_streaming_error_redacts_inputs_and_preserves_rate_limit(monkeypatch):
+    with pytest.raises(OpenAICompatibleError) as caught:
+        stream_completion(monkeypatch, [{'error': {'type': 'rate_limit_error', 'message': 'Limited: private-key private-system private-user'}}])
+    assert caught.value.code == 'RATE_LIMITED' and caught.value.retry_after_seconds == 60
+    assert 'private' not in str(caught.value)
+
+
+def test_stream_budget_also_checks_heartbeat_only_data(monkeypatch):
+    ticks = iter([0, 61])
+    monkeypatch.setattr(openai_compatible, 'monotonic', lambda: next(ticks))
+    with pytest.raises(OpenAICompatibleError) as caught:
+        stream_completion(monkeypatch, [], done=False)
+    assert caught.value.code == 'TIMEOUT'

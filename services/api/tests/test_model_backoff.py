@@ -80,6 +80,11 @@ def test_quota_pause_persists_until_credential_rotation(client):
     with SessionLocal() as session:
         assert session.get(ModelCooldownRow, cid).blocked_until is None
     assert client.post(f"/api/v1/admin/model-credentials/{cid}/rotation", json={"secret": "isolated-new-test-key"}).status_code == 200
+    deployments = client.get("/api/v1/admin/model-deployments").json()["items"]
+    for item in deployments:
+        if item["credentialId"] == cid:
+            assert item["status"] == "draft"
+            assert client.post(f"/api/v1/admin/model-deployments/{item['id']}/probe").status_code == 200
     assert invoke(lambda: {"ok": True}) == {"ok": True}
 
 
